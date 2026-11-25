@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SephiOGame
 // @namespace    sephiogame:local
-// @version      4.0.0-alpha.47
+// @version      4.0.0-alpha.48
 // @description  Frigos, rapports et preparation de flotte directement dans OGame
 // @author       Sephizack and contributors
 // @match        https://*.ogame.gameforge.com/game/index.php*
@@ -1007,10 +1007,21 @@
       try {
         const id = new URL(link.href, location.href).searchParams.get("cp");
         const coords = parseCoords(link.closest(".smallplanet")?.querySelector(".planet-koords")?.textContent ?? link.textContent, link.matches(".moonlink") ? "moon" : "planet");
-        if (id) result.set(id, { id, coords, name: link.getAttribute("title") ?? link.textContent.trim() });
+        const tooltip = link.getAttribute("data-tooltip-title") ?? link.getAttribute("title") ?? "";
+        const name = link.querySelector(".planet-name, .moon-name")?.textContent.trim()
+          || tooltip.match(/<b>\s*([^<]*?)\s*\[\d+:\d+:\d+\]\s*<\/b>/)?.[1]
+          || link.textContent.replace(/\[\s*\d+\s*:\s*\d+\s*:\s*\d+\s*\]/, "").trim();
+        if (id) result.set(id, { id, coords, name });
       } catch { /* Ignore unrelated links. */ }
     }
     return [...result.values()];
+  }
+  function planetLabel(planet) {
+    return [planet.name, formatCoords(planet.coords)].filter(Boolean).join(" ");
+  }
+  function planetLabelById(id, doc = document) {
+    const planet = ownedPlanets(doc).find((p) => p.id === id);
+    return planet ? planetLabel(planet) : `${id}`;
   }
   function constructionCosts(detail, quantity = 1) {
     const costs = {};
@@ -1793,19 +1804,81 @@
   }
 
   // src/core/version.ts
-  var VERSION = "4.0.0-alpha.47";
+  var VERSION = "4.0.0-alpha.48";
 
   // src/ui/panel.ts
   var styles = `
-:host{font:14px/1.5 system-ui,sans-serif;color:#e5edf7;color-scheme:dark}
-*{box-sizing:border-box} button,input,select,textarea{font:inherit} button,a.button{cursor:pointer;background:#21374e;color:#ecf6ff;border:1px solid #46657e;border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,a.button:hover{background:#31536e}button:disabled{opacity:.5;cursor:default}
-.launcher{position:fixed;right:20px;bottom:20px;z-index:1000000;background:#153c50;padding:12px 18px}
-.panel{background:#111d2b;border:1px solid #364d65;border-radius:14px;padding:24px;max-width:1280px;margin:32px auto;box-shadow:0 16px 50px #0006}
-.overlay{position:fixed;inset:30px;z-index:999999;overflow:auto;margin:0;max-width:none} [hidden]{display:none!important}
-h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.header,.toolbar,.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.header{justify-content:space-between}.tag{background:#254454;border-radius:30px;padding:3px 10px;color:#8fe2cd}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}.tabs button[aria-selected=true]{background:#256974}
-.card{background:#182737;border:1px solid #30445b;border-radius:10px;padding:18px;margin:16px 0} label{display:grid;gap:4px;color:#b3c6d9}input,textarea,select{background:#0f1a27;color:#edf5fc;border:1px solid #425871;border-radius:6px;padding:8px;width:100%;min-width:0}input[type=checkbox]{width:auto} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px} .wide{grid-column:1/-1}textarea{min-height:90px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid #30445b}th{color:#a4bfd5;font-weight:500}td.actions{min-width:190px}td button{padding:5px 8px;margin:2px}.table{overflow:auto}small{color:#aabdd0}.status{min-height:24px;white-space:pre-wrap;color:#8fe2cd}.status.error{color:#ffa99b}pre{white-space:pre-wrap;overflow-wrap:anywhere} .summary{font-size:22px;color:#8fe2cd;margin:10px 0}a{color:#8fe2cd}
-.report-warning{background:#492d21;color:#ffd08a;font-weight:600}
-@media(max-width:650px){.panel{padding:14px;margin:12px}.overlay{inset:8px;margin:0}.grid{grid-template-columns:1fr}h1{font-size:22px}}
+:host{--panel:rgba(11,19,34,.9);--line:rgba(130,175,230,.15);--line2:rgba(120,200,255,.32);--text:#e7eef8;--muted:#9bb0c7;--a1:#46e0c8;--a2:#7f8cff;--grad:linear-gradient(135deg,var(--a1),var(--a2));--glow:rgba(70,224,200,.45);--danger:#ff9484;--ease:cubic-bezier(.2,.8,.2,1);font:13.5px/1.5 "Segoe UI",system-ui,sans-serif;color:var(--text);color-scheme:dark}
+*{box-sizing:border-box}button,input,select,textarea{font:inherit}
+button,a.button{position:relative;cursor:pointer;color:#eaf4ff;background:linear-gradient(180deg,rgba(64,96,138,.34),rgba(28,45,70,.6));border:1px solid var(--line2);border-radius:8px;padding:7px 12px;text-decoration:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.07);transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s,background-color .18s,color .18s,filter .18s}
+button:hover:not(:disabled),a.button:hover{transform:translateY(-1px);border-color:rgba(110,230,212,.7);box-shadow:0 5px 16px -6px var(--glow),inset 0 1px 0 rgba(255,255,255,.12)}
+button:active:not(:disabled),a.button:active{transform:translateY(0) scale(.97);transition-duration:.06s}
+button:focus-visible,a.button:focus-visible{outline:2px solid var(--a1);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button[type=submit],button.primary{background:var(--grad);border-color:transparent;color:#05161d;font-weight:600;box-shadow:0 4px 14px -6px var(--glow)}
+button[type=submit]:hover:not(:disabled),button.primary:hover:not(:disabled){filter:brightness(1.1);box-shadow:0 8px 22px -8px var(--glow)}
+button.danger{color:#ffc9c0}button.danger:hover:not(:disabled){border-color:rgba(255,148,132,.75);box-shadow:0 5px 16px -6px rgba(255,120,100,.5)}
+.launcher{position:fixed;right:20px;bottom:20px;z-index:1000000;background:var(--grad);color:#05161d;font-weight:600;border:0;border-radius:999px;padding:10px 18px;box-shadow:0 10px 26px -8px var(--glow)}
+.launcher::after{content:"";position:absolute;inset:-3px;border-radius:inherit;border:2px solid var(--a1);opacity:0;animation:sephi-ring 3s var(--ease) infinite;pointer-events:none}
+.panel{background:radial-gradient(120% 50% at 0% 0%,rgba(70,224,200,.09),transparent 60%),radial-gradient(90% 50% at 100% 0%,rgba(127,140,255,.12),transparent 60%),var(--panel);-webkit-backdrop-filter:blur(14px) saturate(1.25);backdrop-filter:blur(14px) saturate(1.25);border:1px solid var(--line2);border-radius:16px;padding:24px;max-width:1280px;margin:32px auto;box-shadow:0 26px 60px -14px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.03)}
+.overlay{container:sephi/inline-size;position:fixed;top:70px;left:12px;width:460px;height:calc(100vh - 100px);min-width:300px;min-height:140px;max-width:calc(100vw - 24px);max-height:calc(100vh - 16px);z-index:999999;overflow:auto;resize:both;margin:0;padding:12px 14px;border-radius:14px;scrollbar-width:thin;scrollbar-color:rgba(120,190,255,.3) transparent;animation:sephi-in .34s var(--ease) both}
+.overlay .header{position:sticky;top:-12px;z-index:3;margin:-12px -14px 0;padding:12px 14px 10px;background:linear-gradient(180deg,rgba(9,16,29,.97),rgba(9,16,29,.86));-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none;flex-wrap:wrap;gap:6px 8px}
+.overlay .header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,var(--a1),var(--a2),transparent);background-size:200% 100%;animation:sephi-sheen 7s linear infinite;pointer-events:none}
+.overlay .header>div:first-child{flex:1 1 220px;min-width:0}.header-actions{display:flex;gap:6px;margin-left:auto;flex:none}
+.overlay .header button{padding:4px 10px;font-size:12px}.overlay .header span{color:var(--muted);font-size:11.5px}.overlay .header p{margin:2px 0 0;font-size:12px;color:var(--muted)}.overlay .header .tag{font-size:11px;padding:2px 9px}
+h1{display:flex;align-items:center;gap:8px;font-size:24px;margin:0;letter-spacing:.3px}.overlay h1{font-size:17px}
+h1::before{content:"";flex:none;width:9px;height:9px;border-radius:50%;background:var(--a1);box-shadow:0 0 0 3px rgba(70,224,200,.15),0 0 12px var(--a1);animation:sephi-blink 2.6s ease-in-out infinite}
+.brand{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+[hidden]{display:none!important}
+h2{display:flex;align-items:center;gap:8px;font-size:17px;margin:0 0 12px;letter-spacing:.2px}h2::before{content:"";flex:none;width:3px;height:1em;border-radius:3px;background:var(--grad)}
+p{color:var(--muted)}a{color:var(--a1)}small{color:var(--muted)}
+.header,.toolbar,.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.header{justify-content:space-between}
+.tag{background:rgba(70,224,200,.09);border:1px solid rgba(70,224,200,.32);border-radius:999px;padding:3px 10px;color:#a3f1e4}
+.tabs{display:flex;gap:3px;flex-wrap:wrap;margin:20px 0;padding:4px;background:rgba(5,10,20,.55);border:1px solid var(--line);border-radius:12px}.overlay .tabs{margin:12px 0}
+.tabs button{background:transparent;border-color:transparent;box-shadow:none;color:var(--muted);padding:5px 10px;font-size:12px;border-radius:8px}
+.tabs button:hover:not(:disabled){transform:none;color:var(--text);background:rgba(255,255,255,.06);border-color:transparent;box-shadow:none}
+.tabs button[aria-selected=true]{background:var(--grad);color:#05161d;font-weight:600;box-shadow:0 4px 14px -6px var(--glow)}
+.card{background:linear-gradient(180deg,rgba(30,48,74,.5),rgba(16,27,44,.55));border:1px solid var(--line);border-radius:12px;padding:18px;margin:16px 0;transition:border-color .25s,box-shadow .25s}.card:hover{border-color:var(--line2);box-shadow:0 10px 30px -18px var(--glow)}
+.overlay .card{padding:13px;margin:10px 0}.overlay h2{font-size:14.5px}
+main.enter>*{animation:sephi-rise .4s var(--ease) both}main.enter>:nth-child(2){animation-delay:.05s}main.enter>:nth-child(3){animation-delay:.1s}main.enter>:nth-child(n+4){animation-delay:.15s}
+label{display:grid;gap:4px;color:var(--muted);font-size:12.5px}
+input,textarea,select{background:rgba(5,11,21,.7);color:#edf5fc;border:1px solid rgba(120,175,230,.24);border-radius:8px;padding:8px 10px;width:100%;min-width:0;transition:border-color .18s,box-shadow .18s,background-color .18s}
+input:hover,textarea:hover,select:hover{border-color:rgba(120,200,255,.42)}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--a1);background:rgba(5,11,21,.9);box-shadow:0 0 0 3px rgba(70,224,200,.17)}
+input::placeholder,textarea::placeholder{color:rgba(155,176,199,.5)}input[type=checkbox]{width:auto;accent-color:var(--a1)}select option{background:#0c1626}input[type=file]{padding:6px}
+input[type=file]::file-selector-button{margin-right:10px;border:1px solid var(--line2);border-radius:6px;background:rgba(64,96,138,.4);color:#eaf4ff;padding:4px 10px;cursor:pointer}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.wide{grid-column:1/-1}textarea{min-height:90px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.6px}
+tbody tr{transition:background-color .2s}tbody tr:hover{background:rgba(120,190,255,.045)}
+.overlay table{font-size:12px}.overlay th,.overlay td{padding:7px 5px}
+td button{padding:5px 8px;margin:2px}.table{overflow:auto}
+.status{white-space:pre-wrap;color:#a3f1e4}.status:not(:empty){margin:4px 0 2px;padding:8px 12px;border-radius:10px;background:rgba(70,224,200,.07);border:1px solid rgba(70,224,200,.24);animation:sephi-rise .3s var(--ease) both}
+.status.error{color:var(--danger)}.status.error:not(:empty){background:rgba(255,120,100,.08);border-color:rgba(255,148,132,.35)}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(5,11,21,.6);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:11.5px}
+details summary{cursor:pointer;color:var(--a1);font-size:12px}details[open] summary{margin-bottom:4px}
+.summary{font-size:22px;margin:10px 0;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:600}
+.report-warning{background:rgba(255,170,90,.12);color:#ffd08a;font-weight:600}
+a.button{display:inline-flex;align-items:center;justify-content:center;line-height:1.3;white-space:nowrap}
+.btns{display:flex;flex-wrap:wrap;gap:5px}.btns+.btns{margin-top:5px}.btns button,.btns a.button{margin:0;padding:4px 10px;line-height:1.3;white-space:nowrap}
+td.actions{width:45%}td.actions details{margin-top:6px}
+.overlay.collapsed{height:auto!important;min-height:0;resize:none;overflow:hidden}.overlay.collapsed .tabs,.overlay.collapsed .status,.overlay.collapsed main{display:none}
+@container sephi (max-width:600px){
+table.targets,table.targets tbody{display:block}table.targets thead{display:none}
+table.targets tr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 12px;padding:11px;margin-bottom:8px;background:rgba(5,11,21,.35);border:1px solid var(--line);border-radius:10px;transition:border-color .2s,background-color .2s}
+table.targets tr:hover{border-color:var(--line2)}
+table.targets td{display:block;padding:0;border:0;width:auto;min-width:0;overflow-wrap:anywhere}
+table.targets td[data-label]::before{content:attr(data-label);display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
+.btns>*{flex:1 1 auto}
+}
+@container sephi (max-width:380px){table.targets tr{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.panel{padding:14px;margin:12px}.overlay{top:8px;left:8px;width:calc(100vw - 16px);height:calc(100vh - 16px);margin:0}.grid{grid-template-columns:1fr}h1{font-size:20px}}
+@keyframes sephi-in{from{opacity:0;transform:translateY(10px) scale(.985)}}
+@keyframes sephi-rise{from{opacity:0;transform:translateY(8px)}}
+@keyframes sephi-sheen{to{background-position:-200% 0}}
+@keyframes sephi-blink{50%{opacity:.45}}
+@keyframes sephi-ring{0%{opacity:.7;transform:scale(1)}70%,100%{opacity:0;transform:scale(1.18)}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
   function element(tag, text = "") {
     const el = document.createElement(tag);
@@ -1851,7 +1924,10 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       const header = element("header");
       header.className = "header";
       const heading = element("div");
-      heading.append(element("h1", "SephiOGame"), element("span", `${VERSION} \xB7 userscript priv\xE9`));
+      const title = element("h1"), brand = element("span", "SephiOGame");
+      brand.className = "brand";
+      title.append(brand);
+      heading.append(title, element("span", `${VERSION} \xB7 userscript priv\xE9`));
       if (context && window.top === window.self) {
         const countdown = element("p", nextAttackText(this.campaign));
         countdown.dataset.sephiCountdown = "";
@@ -1862,11 +1938,15 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       badge.className = "tag";
       header.append(badge);
       if (context) {
-        header.append(this.button("Fermer", () => {
+        const headerActions = element("div");
+        headerActions.className = "header-actions";
+        headerActions.append(this.button("Fermer", () => {
           this.panel.hidden = true;
         }));
-        this.panel.hidden = true;
-        const launcher = this.button("SephiOGame \xB7 Frigos", () => {
+        header.append(headerActions);
+        // Open by default in the main game window; hidden worker iframes keep it closed.
+        this.panel.hidden = window.top !== window.self;
+        const launcher =this.button("SephiOGame \xB7 Frigos", () => {
           this.panel.hidden = !this.panel.hidden;
         });
         launcher.className = "launcher";
@@ -1889,6 +1969,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       this.content = element("main");
       this.panel.append(header, tabs, this.status, this.content);
       this.shadow.append(this.panel);
+      if (context) this.makeFloating(header);
       if (this.campaign?.status === "running" && this.campaign.phase !== "wait" && this.campaign.runnerId === this.campaignTabId) {
         this.activeTab = "Auto-attaques";
         this.panel.hidden = false;
@@ -1970,6 +2051,56 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
     closeFinishedCampaignPanel() {
       if (this.backgroundCoordinator && this.activeTab === "Auto-attaques" && this.panel) this.panel.hidden = true;
     }
+    makeFloating(header) {
+      const panel = this.panel, key = `${this.store.key}:window`;
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(key)) ?? {}; } catch { saved = {}; }
+      const save = () => {
+        const r = panel.getBoundingClientRect();
+        const next = { left: Math.round(r.left), top: Math.round(r.top), collapsed: panel.classList.contains("collapsed") };
+        if (!next.collapsed && r.width > 0) { next.width = Math.round(r.width); next.height = Math.round(r.height); } else { next.width = saved.width; next.height = saved.height; }
+        saved = next;
+        try { localStorage.setItem(key, JSON.stringify(next)); } catch { }
+      };
+      const clamp = () => {
+        const r = panel.getBoundingClientRect();
+        if (r.width === 0) return;
+        panel.style.left = `${Math.min(Math.max(0, r.left), Math.max(0, innerWidth - 80))}px`;
+        panel.style.top = `${Math.min(Math.max(0, r.top), Math.max(0, innerHeight - 40))}px`;
+      };
+      if (Number.isFinite(saved.left)) panel.style.left = `${saved.left}px`;
+      if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
+      if (Number.isFinite(saved.width)) panel.style.width = `${saved.width}px`;
+      if (Number.isFinite(saved.height)) panel.style.height = `${saved.height}px`;
+      const collapse = this.button("Réduire", () => {
+        const collapsed = panel.classList.toggle("collapsed");
+        collapse.textContent = collapsed ? "Agrandir" : "Réduire";
+        save();
+      });
+      collapse.title = "Réduire / agrandir la fenêtre";
+      (header.querySelector(".header-actions") ?? header).append(collapse);
+      if (saved.collapsed) { panel.classList.add("collapsed"); collapse.textContent = "Agrandir"; }
+      let drag = null;
+      header.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || event.target.closest("button")) return;
+        const r = panel.getBoundingClientRect();
+        drag = { dx: event.clientX - r.left, dy: event.clientY - r.top };
+        header.setPointerCapture(event.pointerId);
+        event.preventDefault();
+      });
+      header.addEventListener("pointermove", (event) => {
+        if (!drag) return;
+        panel.style.left = `${Math.min(Math.max(0, event.clientX - drag.dx), Math.max(0, innerWidth - 80))}px`;
+        panel.style.top = `${Math.min(Math.max(0, event.clientY - drag.dy), Math.max(0, innerHeight - 40))}px`;
+      });
+      const stop = () => { if (!drag) return; drag = null; save(); };
+      header.addEventListener("pointerup", stop);
+      header.addEventListener("pointercancel", stop);
+      header.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) collapse.click(); });
+      let timer;
+      if (typeof ResizeObserver === "function") new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(save, 400); }).observe(panel);
+      window.addEventListener("resize", () => { clamp(); });
+    }
     open(tab = "Frigos") {
       this.activeTab = tab;
       this.panel.hidden = false;
@@ -1995,6 +2126,8 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
     button(text, action) {
       const b = element("button", text);
       b.type = "button";
+      if (/^(Enregistrer|D\xE9marrer|Analyser|Calculer|Lancer|Programmer|Importer|Nouvelle campagne)/.test(text)) b.classList.add("primary");
+      else if (/^(Supprimer|Annuler|Abandonner|Terminer|\xC9carter)/.test(text)) b.classList.add("danger");
       b.addEventListener("click", () => this.guarded(action));
       return b;
     }
@@ -2034,6 +2167,11 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       this.onChange();
     }
     render() {
+      // Animate the content only when the tab actually changes, not on background refreshes.
+      const switched = this.renderedTab !== this.activeTab;
+      this.renderedTab = this.activeTab;
+      this.content.classList.remove("enter");
+      if (switched) { void this.content.offsetWidth; this.content.classList.add("enter"); }
       this.content.replaceChildren();
       this.shadow.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === this.activeTab)));
       if (this.activeTab === "Frigos") this.targets();
@@ -2333,7 +2471,9 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       const draw = () => {
         tableHost.replaceChildren();
         const table = element("table"), head = element("thead"), tr = element("tr");
+        table.className = "targets";
         for (const label of ["Cible", "Butin estim\xE9", "Dernier scan", "\xC9tat", "Actions"]) tr.append(element("th", label));
+        const labelled = (td, label) => { td.dataset.label = label; return td; };
         head.append(tr);
         table.append(head);
         const body = element("tbody");
@@ -2353,9 +2493,12 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
           row.append(name);
           const amount = element("td", target2.lastReport ? fmt(loot(target2)) : "\u2014");
           if (target2.lastReport) amount.append(element("br"), element("small", `${calculateRequiredCargo(loot(target2), this.data.settings.smallCargo)} PT \xB7 ${calculateRequiredCargo(loot(target2), this.data.settings.largeCargo)} GT`));
-          row.append(amount, element("td", target2.lastReport ? new Date(target2.lastReport.observedAt).toLocaleString("fr-FR") : "\u2014"), element("td", targetStatus(target2)));
-          const actions = element("td");
-          actions.className = "actions";
+          row.append(labelled(amount, "Butin estim\xE9"), labelled(element("td", target2.lastReport ? new Date(target2.lastReport.observedAt).toLocaleString("fr-FR") : "\u2014"), "Dernier scan"), labelled(element("td", targetStatus(target2)), "\xC9tat"));
+          const cell = element("td"), actions = element("div"), links = element("div");
+          cell.className = "actions";
+          actions.className = "btns";
+          links.className = "btns";
+          cell.append(actions, links);
           actions.append(this.button("Modifier", () => {
             this.editing = target2.id;
             this.render();
@@ -2368,7 +2511,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
               a.href = action === "spy" ? fleetURL(target2.coords, "spy", this.context, 210, target2.probeCount) : actionURL(target2.coords, action, this.context.planetId);
               a.className = "button";
               a.title = "Ouvre la page flotte ; s\xE9lection et envoi \xE0 confirmer dans OGame.";
-              actions.append(a);
+              links.append(a);
             }
           }
           if (this.context && target2.lastReport && loot(target2) > 0) {
@@ -2376,16 +2519,17 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
               const a = element("a", label);
               a.className = "button";
               a.href = fleetURL(target2.coords, "attack", this.context, ship, calculateRequiredCargo(loot(target2), capacity), loot(target2));
-              actions.append(a);
+              links.append(a);
             }
           }
           if (target2.history.length) {
             const details = element("details");
             details.append(element("summary", `Historique (${target2.history.length})`));
             for (const r of [...target2.history].reverse()) details.append(element("p", `${new Date(r.observedAt).toLocaleString("fr-FR")} \xB7 M ${fmt(r.resources.metal)} / C ${fmt(r.resources.crystal)} / D ${fmt(r.resources.deuterium)} \xB7 flotte ${r.fleet ?? "?"} \xB7 d\xE9fense ${r.defense ?? "?"}`));
-            actions.append(details);
+            cell.append(details);
           }
-          row.append(actions);
+          if (!links.childElementCount) links.remove();
+          row.append(cell);
           body.append(row);
         }
         table.append(body);
@@ -2525,7 +2669,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       this.field(grid, "Slots utilisables libres nécessaires (hors réserve)", "freeSlotsTrigger", String(s.freeSlotsTrigger ?? 3), "number").min = "1";
       this.field(grid, "Inactivité avant lancement par slots (secondes)", "attackIdleSeconds", String(s.attackIdleSeconds ?? 60), "number").min = "15";
       const homes = ownedPlanets().filter((planet) => planet.coords.type !== "moon");
-      this.select(grid, "Planète mère pour les campagnes", "homePlanetId", [["", "Première planète de la liste OGame"], ...homes.map((planet) => [planet.id, `${planet.name} ${formatCoords(planet.coords)}`])], s.homePlanetId ?? "");
+      this.select(grid, "Planète mère pour les campagnes", "homePlanetId", [["", "Première planète de la liste OGame"], ...homes.map((planet) => [planet.id, planetLabel(planet)])], s.homePlanetId ?? "");
       this.field(grid, "Maximum de vagues par frigo et par cycle", "maxAttackWaves", String(s.maxAttackWaves ?? 10), "number").min = "1";
       grid.append(element("small", "Le mode slots surveille la planète mère toutes les 15 secondes pendant votre absence. La rotation des planètes attend deux minutes sans activité."));
       this.field(grid, "Capacit\xE9 effective PT", "smallCargo", String(s.smallCargo), "number").min = "1";
@@ -3606,7 +3750,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
         bar.style.cssText = "box-sizing:border-box;display:flex;align-items:center;gap:7px;height:27px;margin:0 0 2px;padding:0 8px 0 14px;border:1px solid #344d61;border-top-color:#50677a;border-bottom-color:#0b121c;border-radius:2px;background:linear-gradient(100deg,#182c3b,#263c4e 45%,#142431);box-shadow:inset 0 1px #ffffff0b;color:#6f9fc8;font:12px Verdana,Arial,sans-serif;text-shadow:0 1px #000";
         const label = element("span", `${item.id === lockedId ? "[En cours] " : ""}${item.name}${item.quantity > 1 ? ` × ${fmt(item.quantity)}` : ""}`);
         label.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-        label.title = `${names[item.page]} · planète ${item.planetId}`;
+        label.title = `${names[item.page]} · planète ${planetLabelById(item.planetId)}`;
         bar.append(label);
         const category = element("small", names[item.page]);
         category.dataset.sephiEstimate = item.id;
@@ -3670,7 +3814,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
     constructions() {
       const card = this.card("File de construction");
       if (!this.context) { card.append(element("p", "Ouvrez OGame pour gérer les files par planète.")); return; }
-      const planets = new Map(ownedPlanets().map((planet) => [planet.id, planet.name || formatCoords(planet.coords)]));
+      const planets = new Map(ownedPlanets().map((planet) => [planet.id, planetLabel(planet)]));
       for (const item of this.data.constructionQueue ?? []) if (!planets.has(item.planetId)) planets.set(item.planetId, `Planète ${item.planetId}`);
       if (!planets.has(this.context.planetId)) planets.set(this.context.planetId, `Planète courante (${this.context.planetId})`);
       const planetId = this.constructionPlanetId ?? this.context.planetId;
@@ -3797,10 +3941,10 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       const planetId = this.constructionVisitReady && candidates.includes(this.context.planetId) ? this.context.planetId : candidates[0], state = this.constructionState(planetId);
       const lastCheck = this.constructionVisitReady ? now - 120000 : this.lastConstructionCheck ?? now;
       const remaining = Math.ceil(Math.max(0, 120000 - (now - lastActivity), 120000 - (now - lastCheck)) / 1000);
-      showPreparation(`Contrôle de la file de la planète ${planetId} dans ${remaining} s sans activité. Un clic reporte le changement de deux minutes.`);
+      showPreparation(`Contrôle de la file de la planète ${planetLabelById(planetId)} dans ${remaining} s sans activité. Un clic reporte le changement de deux minutes.`);
       if (!idleCheckAllowed(lastActivity, lastCheck, now)) return;
       if (planetId !== this.context.planetId) {
-        showPreparation(`Changement vers la planète ${planetId} pour vérifier sa file et ses ressources.`);
+        showPreparation(`Changement vers la planète ${planetLabelById(planetId)} pour vérifier sa file et ses ressources.`);
         sessionStorage.setItem(`${this.store.key}:construction-visit`, JSON.stringify({ planetId, owner: this.campaignTabId, expiresAt: now + 60000 }));
         const url = new URL("/game/index.php", location.href);
         url.searchParams.set("page", "ingame");
@@ -3816,7 +3960,7 @@ h1{font-size:26px;margin:0}h2{font-size:18px;margin:0 0 12px}p{color:#aabdd0}.he
       const token = crypto.randomUUID?.() ?? `${now}-${Math.random()}`;
       this.setConstructionState({ ...state, running: true, owner: this.campaignTabId, token, busy: Boolean(item), busySince: now, checkedAt: now, message: item ? "Contrôle automatique des ressources et du chantier." : "Planète vérifiée · aucune construction programmée." }, planetId);
       if (!item) { capturePlanetEconomy(this.store.key, this.context); this.resumeCampaignAfterConstruction(); return; }
-      showPreparation(`Vérification de la file et des ressources de la planète ${planetId}.`);
+      showPreparation(`Vérification de la file et des ressources de la planète ${planetLabelById(planetId)}.`);
       const frame = document.createElement("iframe");
       frame.id = "sephi-construction-worker";
       frame.dataset.sephiWorker = token;
