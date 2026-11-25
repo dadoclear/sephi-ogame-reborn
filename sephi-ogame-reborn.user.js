@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SephiOGame
 // @namespace    sephiogame:local
-// @version      4.0.0-alpha.48
+// @version      4.0.0-alpha.49
 // @description  Frigos, rapports et preparation de flotte directement dans OGame
 // @author       Sephizack and contributors
 // @match        https://*.ogame.gameforge.com/game/index.php*
@@ -9,6 +9,8 @@
 // @sandbox      JavaScript
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
 // ==/UserScript==
 "use strict";
 (() => {
@@ -1023,6 +1025,84 @@
     const planet = ownedPlanets(doc).find((p) => p.id === id);
     return planet ? planetLabel(planet) : `${id}`;
   }
+
+  // Expeditions — calls OGame's own fleet endpoints directly (fleet page data + sendFleet),
+  // so no page has to be driven or clicked.
+  var EXPEDITION_SHIPS = [[202, "Petit transporteur"], [203, "Grand transporteur"], [219, "\xC9claireur"], [204, "Chasseur l\xE9ger"], [205, "Chasseur lourd"], [206, "Croiseur"], [207, "Vaisseau de bataille"], [215, "Traqueur"], [211, "Bombardier"], [213, "Destructeur"], [218, "Faucheur"], [209, "Recycleur"], [210, "Sonde d’espionnage"], [214, "\xC9toile de la mort"]];
+  var EXPEDITION_MISSION = 15, EXPEDITION_POSITION = 16;
+  function parseSystem(text) {
+    const match = String(text).match(/^\s*\[?\s*(\d+)\s*:\s*(\d+)\s*\]?\s*$/);
+    if (!match) throw new Error("Syst\xE8me cible invalide. Exemple : 3:179.");
+    const { galaxy, system } = coordinates(match[1], match[2], 1);
+    return { galaxy, system };
+  }
+  function defaultExpeditionConfig() {
+    return { enabled: false, planetId: "", target: "", holdingTime: 1, speed: 100, maxConcurrent: 0, ships: {} };
+  }
+  function gameURL(params) {
+    const url = new URL("/game/index.php", location.href);
+    for (const [key, value] of Object.entries({ page: "ingame", ...params })) if (value !== void 0 && value !== "") url.searchParams.set(key, String(value));
+    return url;
+  }
+  // Reads the fleet page of a planet (cp switches the active planet, like any OGame link) without rendering it.
+  async function fetchFleetSnapshot(planetId) {
+    const response = await fetch(gameURL({ component: "fleetdispatch", cp: planetId }), { credentials: "include" });
+    if (!response.ok) throw new Error(`Page flotte indisponible (HTTP ${response.status}).`);
+    const html = await response.text();
+    const number = (name) => { const match = html.match(new RegExp(`\\b${name}\\s*=\\s*(\\d+)\\s*;`)); return match ? Number(match[1]) : void 0; };
+    const token = html.match(/\bvar\s+token\s*=\s*"([0-9a-f]{32})"/)?.[1];
+    const ships = {};
+    try { for (const ship of JSON.parse(html.match(/\bshipsOnPlanet\s*=\s*(\[[^\]]*\])/)?.[1] ?? "[]")) ships[ship.id] = Number(ship.number) || 0; } catch { /* Checked below. */ }
+    let planet = null;
+    try { planet = JSON.parse(html.match(/\bcurrentPlanet\s*=\s*(\{[^}]*\})/)?.[1] ?? "null"); } catch { /* Checked below. */ }
+    const snapshot = { planetId, token, planet, ships, fleetCount: number("fleetCount"), maxFleetCount: number("maxFleetCount"), expeditionCount: number("expeditionCount"), maxExpeditionCount: number("maxExpeditionCount"), at: Date.now() };
+    if (!token || !planet || [snapshot.fleetCount, snapshot.maxFleetCount, snapshot.expeditionCount, snapshot.maxExpeditionCount].some((value) => value === void 0))
+      throw new Error("Donn\xE9es de la page flotte introuvables (session expir\xE9e ?).");
+    return snapshot;
+  }
+  // Expedition fleets in flight, from the movement page: when each one lands next (return or arrival).
+  async function fetchExpeditionMovements() {
+    const response = await fetch(gameURL({ component: "movement" }), { credentials: "include" });
+    if (!response.ok) throw new Error(`Page mouvements indisponible (HTTP ${response.status}).`);
+    const html = await response.text(), fleets = [];
+    for (const match of html.matchAll(/<div\b[^>]*?data-mission-type="(\d+)"[^>]*?data-return-flight="([^"]*)"[^>]*?data-arrival-time="(\d+)"[^>]*>/g)) {
+      if (Number(match[1]) !== EXPEDITION_MISSION) continue;
+      fleets.push({ returning: match[2] === "1" || match[2] === "true", arrival: Number(match[3]) * 1e3 });
+    }
+    return fleets.sort((a, b) => a.arrival - b.arrival);
+  }
+  // Same request as the Flotte page's "Envoyer" (FleetDispatcher.submitFleet2). The galaxy "miniFleet"
+  // shortcut would be lighter but OGame reserves it to accounts with the Amiral officer.
+  async function sendExpeditionFleet({ planetId, token, galaxy, system, ships, speed, holdingTime }) {
+    const body = new URLSearchParams({ token });
+    for (const [id, count] of Object.entries(ships)) if (count > 0) body.set(`am${id}`, String(count));
+    for (const [key, value] of Object.entries({
+      galaxy, system, position: EXPEDITION_POSITION, type: 1,
+      metal: 0, crystal: 0, deuterium: 0, food: 0, prioMetal: 2, prioCrystal: 3, prioDeuterium: 4, prioFood: 1,
+      mission: EXPEDITION_MISSION, speed: Math.round(speed / 10), retreatAfterDefenderRetreat: 0, lootFoodOnAttack: 0, union: 0, holdingtime: holdingTime
+    })) body.set(key, String(value));
+    const response = await fetch(gameURL({ component: "fleetdispatch", action: "sendFleet", asJson: 1, cp: planetId }), {
+      method: "POST", credentials: "include", body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest" }
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* Handled below. */ }
+    if (!data) throw new Error(`R\xE9ponse OGame illisible (HTTP ${response.status}).`);
+    const errors = Array.isArray(data.errors) ? data.errors : Object.values(data.errors ?? {});
+    return {
+      ok: data.success === true,
+      message: data.success === true ? String(data.message ?? "Exp\xE9dition envoy\xE9e.") : String(errors[0]?.message ?? errors[0] ?? data.message ?? "Envoi refus\xE9 par OGame."),
+      newToken: data.newAjaxToken ?? null
+    };
+  }
+  function nextExpeditionCheck(fleets, now = Date.now()) {
+    // Wake up shortly after the next expedition lands; never sooner than 2 min, never later than 1 h.
+    const next = fleets.map((fleet) => fleet.arrival).filter((time) => time > now).sort((a, b) => a - b)[0];
+    const wanted = next ? next + 9e4 : now + 30 * 6e4;
+    return Math.min(Math.max(wanted, now + 2 * 6e4), now + 60 * 6e4);
+  }
+  var timeFR = (time) => new Date(time).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
   function constructionCosts(detail, quantity = 1) {
     const costs = {};
     let found = false;
@@ -1804,7 +1884,53 @@
   }
 
   // src/core/version.ts
-  var VERSION = "4.0.0-alpha.48";
+  var VERSION = "4.0.0-alpha.49";
+  // Update check: compares @version of the published file with VERSION. The raw URL is also the update link:
+  // Tampermonkey intercepts *.user.js files and offers to update the installed script.
+  var UPDATE_SOURCE = "https://raw.githubusercontent.com/dadoclear/sephi-ogame-reborn/main/sephi-ogame-reborn.user.js";
+  var UPDATE_KEY = "sephiogame:update-check", UPDATE_INTERVAL = 6 * 36e5;
+  function compareVersions(a, b) {
+    const parse = (value) => {
+      const [main, pre = ""] = String(value).trim().replace(/^v/i, "").split("-", 2);
+      return { main: main.split(".").map((n) => Number(n) || 0), pre: pre ? pre.split(".").map((p) => /^\d+$/.test(p) ? Number(p) : p) : [] };
+    };
+    const x = parse(a), y = parse(b);
+    for (let i = 0; i < Math.max(x.main.length, y.main.length); i++) { const d = (x.main[i] ?? 0) - (y.main[i] ?? 0); if (d) return Math.sign(d); }
+    // A release (no suffix) is newer than any pre-release of the same number.
+    if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+    for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+      const p = x.pre[i], q = y.pre[i];
+      if (p === void 0) return -1;
+      if (q === void 0) return 1;
+      if (p === q) continue;
+      if (typeof p === "number" && typeof q === "number") return Math.sign(p - q);
+      if (typeof p === "number") return -1;
+      if (typeof q === "number") return 1;
+      return p < q ? -1 : 1;
+    }
+    return 0;
+  }
+  function fetchRemoteText(url) {
+    // GM_xmlhttpRequest is not subject to the game's CSP; fetch is the fallback outside Tampermonkey.
+    if (typeof GM_xmlhttpRequest === "function") {
+      return new Promise((resolve, reject) => GM_xmlhttpRequest({
+        method: "GET", url, timeout: 15e3, headers: { "Cache-Control": "no-cache" },
+        onload: (r) => r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error(`HTTP ${r.status}`)),
+        onerror: () => reject(new Error("erreur r\xE9seau")), ontimeout: () => reject(new Error("d\xE9lai d\xE9pass\xE9"))
+      }));
+    }
+    return fetch(url, { cache: "no-store" }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); });
+  }
+  async function checkForUpdate({ force = false } = {}) {
+    const cached = readJSON(UPDATE_KEY, {});
+    if (!force && cached.checkedAt && Date.now() - cached.checkedAt < UPDATE_INTERVAL) return cached;
+    const text = await fetchRemoteText(`${UPDATE_SOURCE}?t=${Date.now()}`);
+    const latest = text.match(/^\/\/\s*@version\s+(\S+)/m)?.[1];
+    if (!latest) throw new Error("version publi\xE9e introuvable dans le fichier");
+    const result = { checkedAt: Date.now(), latest };
+    localStorage.setItem(UPDATE_KEY, JSON.stringify(result));
+    return result;
+  }
 
   // src/ui/panel.ts
   var styles = `
@@ -1821,7 +1947,7 @@ button.danger{color:#ffc9c0}button.danger:hover:not(:disabled){border-color:rgba
 .launcher{position:fixed;right:20px;bottom:20px;z-index:1000000;background:var(--grad);color:#05161d;font-weight:600;border:0;border-radius:999px;padding:10px 18px;box-shadow:0 10px 26px -8px var(--glow)}
 .launcher::after{content:"";position:absolute;inset:-3px;border-radius:inherit;border:2px solid var(--a1);opacity:0;animation:sephi-ring 3s var(--ease) infinite;pointer-events:none}
 .panel{background:radial-gradient(120% 50% at 0% 0%,rgba(70,224,200,.09),transparent 60%),radial-gradient(90% 50% at 100% 0%,rgba(127,140,255,.12),transparent 60%),var(--panel);-webkit-backdrop-filter:blur(14px) saturate(1.25);backdrop-filter:blur(14px) saturate(1.25);border:1px solid var(--line2);border-radius:16px;padding:24px;max-width:1280px;margin:32px auto;box-shadow:0 26px 60px -14px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.03)}
-.overlay{container:sephi/inline-size;position:fixed;top:70px;left:12px;width:460px;height:calc(100vh - 100px);min-width:300px;min-height:140px;max-width:calc(100vw - 24px);max-height:calc(100vh - 16px);z-index:999999;overflow:auto;resize:both;margin:0;padding:12px 14px;border-radius:14px;scrollbar-width:thin;scrollbar-color:rgba(120,190,255,.3) transparent;animation:sephi-in .34s var(--ease) both}
+.overlay{container:sephi/inline-size;position:fixed;top:48px;left:16px;width:460px;height:calc(100vh - 64px);min-width:300px;min-height:140px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);z-index:999999;overflow:auto;resize:both;margin:0;padding:12px 14px;border-radius:14px;scrollbar-width:thin;scrollbar-color:rgba(120,190,255,.3) transparent;animation:sephi-in .34s var(--ease) both}
 .overlay .header{position:sticky;top:-12px;z-index:3;margin:-12px -14px 0;padding:12px 14px 10px;background:linear-gradient(180deg,rgba(9,16,29,.97),rgba(9,16,29,.86));-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none;flex-wrap:wrap;gap:6px 8px}
 .overlay .header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,var(--a1),var(--a2),transparent);background-size:200% 100%;animation:sephi-sheen 7s linear infinite;pointer-events:none}
 .overlay .header>div:first-child{flex:1 1 220px;min-width:0}.header-actions{display:flex;gap:6px;margin-left:auto;flex:none}
@@ -1858,6 +1984,22 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(5,11,21,.6);bord
 details summary{cursor:pointer;color:var(--a1);font-size:12px}details[open] summary{margin-bottom:4px}
 .summary{font-size:22px;margin:10px 0;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:600}
 .report-warning{background:rgba(255,170,90,.12);color:#ffd08a;font-weight:600}
+form>h2{margin-top:18px}form>small{display:block;margin-top:8px}
+a.update{display:inline-flex;align-items:center;gap:5px;margin-left:2px;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.2px;color:#2a0b06;background:linear-gradient(135deg,#ffd36b,#ff8a5c);text-decoration:none;cursor:pointer;animation:sephi-update 2.2s ease-out infinite}
+a.update::before{content:"\\2B06";font-size:11px}a.update:hover{filter:brightness(1.1)}
+@keyframes sephi-update{0%{box-shadow:0 0 0 0 rgba(255,170,90,.6)}70%,100%{box-shadow:0 0 0 8px rgba(255,170,90,0)}}
+button.plain{background:linear-gradient(180deg,rgba(64,96,138,.34),rgba(28,45,70,.6));border-color:var(--line2);color:#eaf4ff;font-weight:400;box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}button.plain:hover:not(:disabled){filter:none}
+button.launch{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin-top:12px;padding:12px 16px;font-size:15px;font-weight:700;letter-spacing:.3px;color:#05161d;background:var(--grad);border:0;border-radius:12px;box-shadow:0 10px 28px -10px var(--glow),inset 0 1px 0 rgba(255,255,255,.35);overflow:hidden}
+button.launch::before{content:"\\1F680";font-size:16px}
+button.launch::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.35) 50%,transparent 70%);transform:translateX(-120%);animation:sephi-shine 3.5s ease-in-out infinite;pointer-events:none}
+button.launch:hover:not(:disabled){filter:brightness(1.08);box-shadow:0 14px 34px -10px var(--glow),inset 0 1px 0 rgba(255,255,255,.4)}
+button.launch.danger{background:linear-gradient(135deg,#ffb36b,#ff6f6f);color:#2a0b06;box-shadow:0 10px 28px -10px rgba(255,111,111,.65);animation:sephi-armed 1s ease-in-out infinite}
+button.launch.danger::before{content:"\\26A0"}
+@keyframes sephi-shine{0%,60%{transform:translateX(-120%)}100%{transform:translateX(120%)}}
+@keyframes sephi-armed{50%{transform:scale(1.015)}}.grid.ships{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:12px}.grid.ships small{font-size:11px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}.stats>div{display:grid;gap:2px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:rgba(5,11,21,.4)}.stats small{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}.stats strong{font-size:13px}
+.timeline{list-style:none;margin:0 0 10px;padding:0 0 0 14px;border-left:2px solid var(--line2)}.timeline li{position:relative;margin:4px 0;font-size:12px;color:var(--text)}.timeline li::before{content:"";position:absolute;left:-19px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--a1)}
+.warn{color:var(--danger)!important}.timeline li.warn::before{background:var(--danger)}
 a.button{display:inline-flex;align-items:center;justify-content:center;line-height:1.3;white-space:nowrap}
 .btns{display:flex;flex-wrap:wrap;gap:5px}.btns+.btns{margin-top:5px}.btns button,.btns a.button{margin:0;padding:4px 10px;line-height:1.3;white-space:nowrap}
 td.actions{width:45%}td.actions details{margin-top:6px}
@@ -1872,7 +2014,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
 .btns>*{flex:1 1 auto}
 }
 @container sephi (max-width:380px){table.targets tr{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:650px){.panel{padding:14px;margin:12px}.overlay{top:8px;left:8px;width:calc(100vw - 16px);height:calc(100vh - 16px);margin:0}.grid{grid-template-columns:1fr}h1{font-size:20px}}
+@media(max-width:650px){.panel{padding:14px;margin:12px}.overlay{top:48px;left:16px;width:calc(100vw - 32px);height:calc(100vh - 64px);margin:0}.grid{grid-template-columns:1fr}h1{font-size:20px}}
 @keyframes sephi-in{from{opacity:0;transform:translateY(10px) scale(.985)}}
 @keyframes sephi-rise{from{opacity:0;transform:translateY(8px)}}
 @keyframes sephi-sheen{to{background-position:-200% 0}}
@@ -1928,6 +2070,14 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       brand.className = "brand";
       title.append(brand);
       heading.append(title, element("span", `${VERSION} \xB7 userscript priv\xE9`));
+      // Update notice (hidden until a newer published version is found).
+      this.updateBadge = element("a");
+      this.updateBadge.className = "update";
+      this.updateBadge.href = UPDATE_SOURCE;
+      this.updateBadge.target = "_blank";
+      this.updateBadge.rel = "noopener noreferrer";
+      this.updateBadge.hidden = true;
+      title.append(this.updateBadge);
       if (context && window.top === window.self) {
         const countdown = element("p", nextAttackText(this.campaign));
         countdown.dataset.sephiCountdown = "";
@@ -1955,7 +2105,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const tabs = element("nav");
       tabs.className = "tabs";
       tabs.setAttribute("aria-label", "SephiOGame");
-      for (const name of ["Frigos", "Espionnage", "Découverte", "Auto-attaques", "Constructions", "Param\xE8tres", "Sauvegardes", "Diagnostic"]) {
+      for (const name of ["Frigos", "Espionnage", "Découverte", "Auto-attaques", "Exp\xE9ditions", "Constructions", "Param\xE8tres", "Sauvegardes", "Diagnostic"]) {
         const b = this.button(name, () => {
           this.activeTab = name;
           this.render();
@@ -1970,6 +2120,10 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       this.panel.append(header, tabs, this.status, this.content);
       this.shadow.append(this.panel);
       if (context) this.makeFloating(header);
+      if (window.top === window.self) {
+        this.showUpdate(readJSON(UPDATE_KEY, {}).latest);
+        void this.refreshUpdate();
+      }
       if (this.campaign?.status === "running" && this.campaign.phase !== "wait" && this.campaign.runnerId === this.campaignTabId) {
         this.activeTab = "Auto-attaques";
         this.panel.hidden = false;
@@ -1977,6 +2131,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       this.render();
       window.addEventListener("storage", (event) => {
         if (event.key === `${store.key}:discovery` && this.activeTab === "Découverte") this.render();
+        if (event.key === `${store.key}:expedition-state`) this.updateExpeditionStatus();
         if (event.key === this.campaignKey) {
           this.campaign = this.loadCampaign();
           if (this.campaignTimer) clearTimeout(this.campaignTimer);
@@ -2055,9 +2210,33 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const panel = this.panel, key = `${this.store.key}:window`;
       let saved = {};
       try { saved = JSON.parse(localStorage.getItem(key)) ?? {}; } catch { saved = {}; }
+      // Layout limits: keep a margin from the window edges and never cover the Gameforge bar at the top.
+      const GAP = 16, LAYOUT = 2;
+      const topLimit = () => {
+        // The Gameforge bar (#mmonetbar) is injected late; assume its usual 32px height until it exists.
+        const bar = document.querySelector("#mmonetbar, #siteHeader")?.getBoundingClientRect();
+        return Math.ceil(Math.max(32, bar && bar.height > 0 && bar.top < 80 ? bar.bottom : 0)) + GAP;
+      };
+      const place = (left, top) => {
+        const minTop = topLimit(), maxH = Math.max(140, innerHeight - minTop - GAP);
+        panel.style.maxHeight = `${maxH}px`;
+        panel.style.maxWidth = `${Math.max(300, innerWidth - 2 * GAP)}px`;
+        const r = panel.getBoundingClientRect();
+        const w = r.width || parseFloat(panel.style.width) || 460, h = r.height || maxH;
+        panel.style.left = `${Math.round(Math.min(Math.max(GAP, left), Math.max(GAP, innerWidth - w - GAP)))}px`;
+        panel.style.top = `${Math.round(Math.min(Math.max(minTop, top), Math.max(minTop, innerHeight - h - GAP)))}px`;
+      };
+      const defaultPlacement = () => {
+        // Centre the panel in the free space left of the OGame layout, right below the top bar.
+        const minTop = topLimit();
+        panel.style.height = `${Math.max(140, innerHeight - minTop - GAP)}px`;
+        const width = panel.getBoundingClientRect().width || parseFloat(panel.style.width) || 460;
+        const gutter = ["#pageContent", "#box", "#left", "#bar"].map((s) => document.querySelector(s)?.getBoundingClientRect()).find((r) => r && r.width > 0)?.left ?? 0;
+        place(gutter >= width + 2 * GAP ? (gutter - width) / 2 : GAP, minTop);
+      };
       const save = () => {
         const r = panel.getBoundingClientRect();
-        const next = { left: Math.round(r.left), top: Math.round(r.top), collapsed: panel.classList.contains("collapsed") };
+        const next = { v: LAYOUT, left: Math.round(r.left), top: Math.round(r.top), collapsed: panel.classList.contains("collapsed") };
         if (!next.collapsed && r.width > 0) { next.width = Math.round(r.width); next.height = Math.round(r.height); } else { next.width = saved.width; next.height = saved.height; }
         saved = next;
         try { localStorage.setItem(key, JSON.stringify(next)); } catch { }
@@ -2065,13 +2244,18 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const clamp = () => {
         const r = panel.getBoundingClientRect();
         if (r.width === 0) return;
-        panel.style.left = `${Math.min(Math.max(0, r.left), Math.max(0, innerWidth - 80))}px`;
-        panel.style.top = `${Math.min(Math.max(0, r.top), Math.max(0, innerHeight - 40))}px`;
+        place(r.left, r.top);
       };
-      if (Number.isFinite(saved.left)) panel.style.left = `${saved.left}px`;
-      if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
       if (Number.isFinite(saved.width)) panel.style.width = `${saved.width}px`;
-      if (Number.isFinite(saved.height)) panel.style.height = `${saved.height}px`;
+      // Positions saved by older versions could sit in the corner over the top bar: re-place those.
+      const restore = () => {
+        if (saved.v === LAYOUT && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+          if (Number.isFinite(saved.height)) panel.style.height = `${saved.height}px`;
+          place(saved.left, saved.top);
+        } else defaultPlacement();
+      };
+      if (panel.isConnected && !panel.hidden) restore();
+      else requestAnimationFrame(restore);
       const collapse = this.button("Réduire", () => {
         const collapsed = panel.classList.toggle("collapsed");
         collapse.textContent = collapsed ? "Agrandir" : "Réduire";
@@ -2082,7 +2266,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       if (saved.collapsed) { panel.classList.add("collapsed"); collapse.textContent = "Agrandir"; }
       let drag = null;
       header.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0 || event.target.closest("button")) return;
+        if (event.button !== 0 || event.target.closest("button, a")) return;
         const r = panel.getBoundingClientRect();
         drag = { dx: event.clientX - r.left, dy: event.clientY - r.top };
         header.setPointerCapture(event.pointerId);
@@ -2090,16 +2274,19 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       });
       header.addEventListener("pointermove", (event) => {
         if (!drag) return;
-        panel.style.left = `${Math.min(Math.max(0, event.clientX - drag.dx), Math.max(0, innerWidth - 80))}px`;
-        panel.style.top = `${Math.min(Math.max(0, event.clientY - drag.dy), Math.max(0, innerHeight - 40))}px`;
+        place(event.clientX - drag.dx, event.clientY - drag.dy);
       });
       const stop = () => { if (!drag) return; drag = null; save(); };
       header.addEventListener("pointerup", stop);
       header.addEventListener("pointercancel", stop);
-      header.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) collapse.click(); });
+      header.addEventListener("dblclick", (event) => { if (!event.target.closest("button, a")) collapse.click(); });
       let timer;
       if (typeof ResizeObserver === "function") new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(save, 400); }).observe(panel);
       window.addEventListener("resize", () => { clamp(); });
+      // Re-check once OGame has finished building its layout (top bar, side gutters).
+      const settle = () => { if (saved.v === LAYOUT) clamp(); else defaultPlacement(); };
+      if (document.readyState === "complete") setTimeout(settle, 300);
+      else window.addEventListener("load", () => setTimeout(settle, 300), { once: true });
     }
     open(tab = "Frigos") {
       this.activeTab = tab;
@@ -2178,6 +2365,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       if (this.activeTab === "Espionnage") this.reports();
       if (this.activeTab === "Découverte") this.discovery();
       if (this.activeTab === "Auto-attaques") this.autoAttacks();
+      if (this.activeTab === "Exp\xE9ditions") this.expeditions();
       if (this.activeTab === "Constructions") this.constructions();
       if (this.activeTab === "Param\xE8tres") this.settings();
       if (this.activeTab === "Sauvegardes") this.backups();
@@ -3811,6 +3999,226 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       for (const entry of local) if (entry.costs) for (const key of resourceKeys) total[key] += entry.costs[key];
       this.message(`${info.name} ajouté à la file de cette planète. ${constructionEstimate(local.every((entry) => entry.costs) ? total : undefined, economy).text}.`);
     }
+    showUpdate(latest) {
+      const badge = this.updateBadge;
+      if (!badge) return;
+      const newer = Boolean(latest) && compareVersions(latest, VERSION) > 0;
+      badge.hidden = !newer;
+      if (newer) {
+        badge.textContent = `Mise \xE0 jour ${latest}`;
+        badge.title = `Version install\xE9e : ${VERSION}. Cliquer ouvre le fichier publi\xE9 : Tampermonkey propose alors la mise \xE0 jour.`;
+      }
+    }
+    async refreshUpdate(force = false) {
+      try {
+        const result = await checkForUpdate({ force });
+        this.showUpdate(result.latest);
+        return result;
+      } catch (error) {
+        if (force) throw new Error(`V\xE9rification des mises \xE0 jour impossible : ${error instanceof Error ? error.message : error}`);
+        return null;
+      }
+    }
+    expeditionConfig() { return { ...defaultExpeditionConfig(), ...readJSON(`${this.store.key}:expedition-config`, {}) }; }
+    expeditionState() { return readJSON(`${this.store.key}:expedition-state`, {}); }
+    setExpeditionState(patch) {
+      const next = { ...this.expeditionState(), ...patch };
+      localStorage.setItem(`${this.store.key}:expedition-state`, JSON.stringify(next));
+      this.updateExpeditionStatus();
+      return next;
+    }
+    logExpedition(text, ok = true) {
+      const log = [{ at: Date.now(), text, ok }, ...(this.expeditionState().log ?? [])].slice(0, 15);
+      this.setExpeditionState({ log });
+    }
+    // Called every second by the automation clock; does real work only when a check is due.
+    monitorExpeditions() {
+      if (window.top !== window.self || !this.context || this.expeditionBusy) return;
+      const config = this.expeditionConfig(), state = this.expeditionState(), now = Date.now();
+      if (!config.enabled || (state.nextCheckAt ?? 0) > now) return;
+      const leaseKey = `${this.store.key}:expedition-lease`, lease = readJSON(leaseKey);
+      if (lease.owner && lease.owner !== this.campaignTabId && now - (lease.at ?? 0) < 9e4) return;
+      // Fleet-page work of other features (campaign send, auto-eject) goes first.
+      const ejectJob = readJSON(`${this.store.key}:eject-job`);
+      if (this.campaign?.pending || ["preparing", "pending"].includes(ejectJob.status)) { this.setExpeditionState({ nextCheckAt: now + 6e4, message: "Autre envoi de flotte en cours \xB7 nouvel essai dans 1 min." }); return; }
+      localStorage.setItem(leaseKey, JSON.stringify({ owner: this.campaignTabId, at: now }));
+      void this.runExpeditionCycle({ send: true });
+    }
+    async runExpeditionCycle({ send }) {
+      if (this.expeditionBusy) return;
+      this.expeditionBusy = true;
+      const config = this.expeditionConfig();
+      try {
+        const planet = ownedPlanets().find((p) => p.id === config.planetId);
+        if (!planet) throw new Error("Choisissez une plan\xE8te de d\xE9part dans l’onglet Exp\xE9ditions.");
+        const target = config.target ? parseSystem(config.target) : { galaxy: planet.coords.galaxy, system: planet.coords.system };
+        const fleet = Object.fromEntries(Object.entries(config.ships ?? {}).map(([id, count]) => [id, Math.max(0, Math.floor(Number(count) || 0))]).filter(([, count]) => count > 0));
+        if (send && !Object.keys(fleet).length) throw new Error("Aucun vaisseau configur\xE9 pour les exp\xE9ditions.");
+        this.setExpeditionState({ message: "Lecture de la page flotte…" });
+        const snapshot = await fetchFleetSnapshot(planet.id);
+        const p = snapshot.planet;
+        if (p.galaxy !== planet.coords.galaxy || p.system !== planet.coords.system || p.position !== planet.coords.position || (p.type === 3) !== (planet.coords.type === "moon"))
+          throw new Error(`OGame a ouvert ${p.name ?? "une autre plan\xE8te"} [${p.galaxy}:${p.system}:${p.position}] au lieu de ${planetLabel(planet)}.`);
+        const reserved = Math.max(0, Number(this.data.settings.reservedFleetSlots ?? 1) || 0);
+        const limit = config.maxConcurrent > 0 ? Math.min(config.maxConcurrent, snapshot.maxExpeditionCount) : snapshot.maxExpeditionCount;
+        let free = Math.max(0, Math.min(limit - snapshot.expeditionCount, snapshot.maxFleetCount - reserved - snapshot.fleetCount));
+        let token = snapshot.token, sent = 0, stop = "";
+        const ships = { ...snapshot.ships };
+        while (send && free > 0) {
+          const missing = Object.entries(fleet).filter(([id, count]) => (ships[id] ?? 0) < count).map(([id, count]) => `${count - (ships[id] ?? 0)} ${EXPEDITION_SHIPS.find(([sid]) => String(sid) === id)?.[1] ?? id}`);
+          if (missing.length) { stop = `Vaisseaux insuffisants sur ${planetLabel(planet)} : il manque ${missing.join(", ")}.`; break; }
+          const result = await sendExpeditionFleet({ planetId: planet.id, token, galaxy: target.galaxy, system: target.system, ships: fleet, speed: config.speed, holdingTime: config.holdingTime });
+          if (!result.ok) { stop = `OGame a refus\xE9 l’exp\xE9dition : ${result.message}`; this.logExpedition(stop, false); break; }
+          this.logExpedition(`Exp\xE9dition envoy\xE9e vers [${target.galaxy}:${target.system}:16] depuis ${planetLabel(planet)}.`);
+          for (const [id, count] of Object.entries(fleet)) ships[id] = (ships[id] ?? 0) - count;
+          sent += 1; free -= 1;
+          if (!result.newToken) break;
+          token = result.newToken;
+          await new Promise((resolve) => setTimeout(resolve, 1500 + Math.random() * 1500));
+        }
+        const movements = await fetchExpeditionMovements();
+        const expeditionCount = snapshot.expeditionCount + sent, fleetCount = snapshot.fleetCount + sent;
+        const why = stop || (send && !sent ? (expeditionCount >= limit ? "Toutes les exp\xE9ditions autoris\xE9es sont en cours." : "Pas de slot de flotte libre (r\xE9serve comprise).") : "");
+        const now = Date.now();
+        this.setExpeditionState({
+          lastCheckAt: now, nextCheckAt: send ? nextExpeditionCheck(movements, now) : this.expeditionState().nextCheckAt,
+          counts: { expeditionCount, maxExpeditionCount: snapshot.maxExpeditionCount, fleetCount, maxFleetCount: snapshot.maxFleetCount, reserved, limit },
+          ships: { planetId: planet.id, at: now, available: ships }, movements, error: null,
+          message: sent ? `${sent} exp\xE9dition(s) envoy\xE9e(s).${why ? ` ${why}` : ""}` : why || "Contr\xF4le termin\xE9."
+        });
+        if (stop && !stop.startsWith("OGame")) this.logExpedition(stop, false);
+        // A manual check refreshes the "Disponible" hints next to the ship fields.
+        if (!send && this.activeTab === "Exp\xE9ditions") this.render();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.setExpeditionState({ lastCheckAt: Date.now(), nextCheckAt: send ? Date.now() + 10 * 6e4 : this.expeditionState().nextCheckAt, error: message, message: `Erreur : ${message}` });
+        if (send) this.logExpedition(message, false);
+      } finally {
+        this.expeditionBusy = false;
+        const leaseKey = `${this.store.key}:expedition-lease`;
+        if (readJSON(leaseKey).owner === this.campaignTabId) localStorage.removeItem(leaseKey);
+      }
+    }
+    expeditions() {
+      const config = this.expeditionConfig();
+      const planets = ownedPlanets();
+      const card = this.card("Exp\xE9ditions automatiques");
+      card.append(element("p", "Les exp\xE9ditions partent en position 16 du syst\xE8me choisi, avec la flotte d\xE9finie ci-dessous. D\xE8s qu’une exp\xE9dition revient et lib\xE8re un slot, une nouvelle est relanc\xE9e. Le contr\xF4le n’a lieu qu’au retour pr\xE9vu des flottes (au plus une fois par heure sinon). Les slots r\xE9serv\xE9s des Param\xE8tres restent libres."));
+      const form = element("form"), grid = element("div");
+      grid.className = "grid";
+      const enabled = this.select(grid, "Automatique", "enabled", [["off", "D\xE9sactiv\xE9e"], ["on", "Activ\xE9e"]], config.enabled ? "on" : "off");
+      const origin = this.select(grid, "Plan\xE8te de d\xE9part", "planetId", [["", "— Choisir —"], ...planets.map((planet) => [planet.id, planetLabel(planet)])], config.planetId);
+      const target = this.field(grid, "Syst\xE8me cible (galaxie:syst\xE8me)", "target", config.target ?? "");
+      target.placeholder = "Celui de la plan\xE8te de d\xE9part";
+      const holding = this.select(grid, "Dur\xE9e sur place", "holdingTime", Array.from({ length: 16 }, (_, i) => [String(i + 1), `${i + 1} h`]), String(config.holdingTime));
+      const speed = this.select(grid, "Vitesse", "speed", Array.from({ length: 10 }, (_, i) => [String(100 - i * 10), `${100 - i * 10} %`]), String(config.speed));
+      const concurrent = this.select(grid, "Exp\xE9ditions simultan\xE9es", "maxConcurrent", [["0", "Maximum autoris\xE9 par OGame"], ...Array.from({ length: 12 }, (_, i) => [String(i + 1), String(i + 1)])], String(config.maxConcurrent ?? 0));
+      form.append(grid);
+      const state = this.expeditionState();
+      const known = state.ships?.planetId === config.planetId ? state.ships.available : null;
+      form.append(element("h2", "Flotte envoy\xE9e \xE0 chaque exp\xE9dition"));
+      const shipsGrid = element("div");
+      shipsGrid.className = "grid ships";
+      const inputs = {};
+      for (const [id, name] of EXPEDITION_SHIPS) {
+        const input = this.field(shipsGrid, name, `am${id}`, String(config.ships?.[id] ?? ""), "number");
+        input.min = "0"; input.step = "1"; input.placeholder = "0";
+        if (known) input.parentElement.append(element("small", `Disponible : ${fmt(known[id] ?? 0)}`));
+        inputs[id] = input;
+      }
+      form.append(shipsGrid);
+      const actions = element("div");
+      actions.className = "btns";
+      // Reads and validates the form as it is on screen (saved or not).
+      const readForm = ({ needShips }) => {
+        const ships = {};
+        for (const [id, input] of Object.entries(inputs)) { const count = Math.floor(Number(input.value) || 0); if (count < 0) throw new Error("Les quantit\xE9s de vaisseaux doivent \xEAtre positives."); if (count) ships[id] = count; }
+        const targetText = target.value.trim();
+        if (targetText) parseSystem(targetText);
+        const next = { enabled: enabled.value === "on", planetId: origin.value, target: targetText, holdingTime: Number(holding.value), speed: Number(speed.value), maxConcurrent: Number(concurrent.value), ships };
+        if ((next.enabled || needShips) && !next.planetId) throw new Error("Choisissez une plan\xE8te de d\xE9part.");
+        if ((next.enabled || needShips) && !Object.keys(ships).length) throw new Error("Indiquez au moins un vaisseau \xE0 envoyer.");
+        return next;
+      };
+      const persist = (next) => {
+        const wasEnabled = config.enabled;
+        localStorage.setItem(`${this.store.key}:expedition-config`, JSON.stringify(next));
+        if (next.enabled) this.setExpeditionState({ nextCheckAt: Date.now() + 3e3, message: wasEnabled ? "Configuration mise \xE0 jour \xB7 contr\xF4le imm\xE9diat." : "Exp\xE9ditions automatiques activ\xE9es \xB7 premier contr\xF4le dans quelques secondes." });
+        else this.setExpeditionState({ nextCheckAt: null, message: "Exp\xE9ditions automatiques d\xE9sactiv\xE9es." });
+      };
+      const save = element("button", "Enregistrer");
+      save.type = "submit";
+      save.className = "plain";
+      // Two-step confirmation inside the panel: native confirm() dialogs can be blocked or auto-dismissed.
+      const launch = this.button("Envoyer maintenant", () => {
+        if (launch.dataset.armed !== "1") {
+          readForm({ needShips: true });
+          launch.dataset.armed = "1";
+          launch.textContent = "Confirmer l’envoi";
+          launch.classList.add("danger");
+          clearTimeout(this.expeditionArmTimer);
+          this.expeditionArmTimer = setTimeout(() => { if (launch.isConnected) { launch.dataset.armed = ""; launch.textContent = "Envoyer maintenant"; launch.classList.remove("danger"); } }, 6e3);
+          return;
+        }
+        clearTimeout(this.expeditionArmTimer);
+        const next = readForm({ needShips: true });
+        persist(next);
+        this.message(next.enabled ? "Configuration enregistr\xE9e \xB7 envoi en cours…" : "Envoi ponctuel en cours (automatique d\xE9sactiv\xE9)…");
+        this.render();
+        return this.runExpeditionCycle({ send: true });
+      });
+      launch.title = "Envoie tout de suite les exp\xE9ditions possibles avec les valeurs affich\xE9es (elles sont enregistr\xE9es).";
+      launch.className = "launch";
+      const refresh = this.button("Actualiser l’\xE9tat", () => this.runExpeditionCycle({ send: false }));
+      refresh.title = "Relit les slots, les vaisseaux disponibles et les retours pr\xE9vus dans OGame. N’envoie rien.";
+      actions.append(save, refresh);
+      form.append(actions, launch);
+      form.append(element("small", "Enregistrer : garde la configuration (et d\xE9marre l’automatique si \xAB Activ\xE9e \xBB). Actualiser l’\xE9tat : relit les slots, les vaisseaux et les retours, sans rien envoyer. Envoyer maintenant : envoi imm\xE9diat, m\xEAme si l’automatique est d\xE9sactiv\xE9e."));
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        this.guarded(() => {
+          persist(readForm({ needShips: false }));
+          this.message("Configuration des exp\xE9ditions enregistr\xE9e.");
+          this.render();
+        });
+      });
+      card.append(form);
+      const status = this.card("\xC9tat des exp\xE9ditions");
+      this.expeditionStatusHost = element("div");
+      status.append(this.expeditionStatusHost);
+      this.updateExpeditionStatus();
+    }
+    updateExpeditionStatus() {
+      const host = this.expeditionStatusHost;
+      if (!host?.isConnected) return;
+      const state = this.expeditionState(), config = this.expeditionConfig(), counts = state.counts;
+      const rows = [
+        ["Automatique", config.enabled ? "Activ\xE9e" : "D\xE9sactiv\xE9e"],
+        ["Exp\xE9ditions", counts ? `${counts.expeditionCount} / ${counts.maxExpeditionCount}${counts.limit < counts.maxExpeditionCount ? ` (limite ${counts.limit})` : ""}` : "—"],
+        ["Flottes", counts ? `${counts.fleetCount} / ${counts.maxFleetCount} \xB7 ${counts.reserved} r\xE9serv\xE9(s)` : "—"],
+        ["Dernier contr\xF4le", state.lastCheckAt ? new Date(state.lastCheckAt).toLocaleString("fr-FR") : "—"],
+        ["Prochain contr\xF4le", config.enabled && state.nextCheckAt ? (state.nextCheckAt <= Date.now() ? "imminent" : timeFR(state.nextCheckAt)) : "—"]
+      ];
+      const list = element("div");
+      list.className = "stats";
+      for (const [label, value] of rows) { const item = element("div"); item.append(element("small", label), element("strong", value)); list.append(item); }
+      const nodes = [list];
+      if (state.message) { const p = element("p", state.message); if (state.error) p.className = "warn"; nodes.push(p); }
+      const flying = (state.movements ?? []).filter((fleet) => fleet.arrival > Date.now());
+      if (flying.length) {
+        const ul = element("ul");
+        ul.className = "timeline";
+        for (const fleet of flying) ul.append(element("li", `${fleet.returning ? "Retour" : "Arriv\xE9e"} \xE0 ${timeFR(fleet.arrival)}`));
+        nodes.push(element("h2", "En vol"), ul);
+      }
+      if (state.log?.length) {
+        const ul = element("ul");
+        ul.className = "timeline";
+        for (const entry of state.log.slice(0, 10)) { const li = element("li", `${timeFR(entry.at)} \xB7 ${entry.text}`); if (!entry.ok) li.className = "warn"; ul.append(li); }
+        nodes.push(element("h2", "Journal"), ul);
+      }
+      host.replaceChildren(...nodes);
+    }
     constructions() {
       const card = this.card("File de construction");
       if (!this.context) { card.append(element("p", "Ouvrez OGame pour gérer les files par planète.")); return; }
@@ -4027,7 +4435,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       };
       updateCountdown();
       const clock = setInterval(() => {
-        for (const task of [updateCountdown, () => { void this.monitorDiscovery().catch((error) => { const scan = this.discoveryState(); if (scan?.status === "running") this.saveDiscovery({ ...scan, status: "paused", message: String(error) }); }); }, () => { void this.monitorSlotCampaign().catch((error) => campaignLog("Surveillance des slots interrompue", { error: String(error) })); }, () => this.syncConstructionWorker(), () => this.monitorAutoEject(), () => this.updateConstructionEstimates()]) {
+        for (const task of [updateCountdown, () => { void this.monitorDiscovery().catch((error) => { const scan = this.discoveryState(); if (scan?.status === "running") this.saveDiscovery({ ...scan, status: "paused", message: String(error) }); }); }, () => { void this.monitorSlotCampaign().catch((error) => campaignLog("Surveillance des slots interrompue", { error: String(error) })); }, () => this.syncConstructionWorker(), () => this.monitorExpeditions(), () => this.monitorAutoEject(), () => this.updateConstructionEstimates()]) {
           try { task(); }
           catch (error) {
             if (Date.now() - (this.lastAutomationError ?? 0) >= 30000) {
@@ -4187,6 +4595,25 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       card.append(element("p", `${this.data.legacyArchives.length} archives historiques conserv\xE9es dans les exports.`));
     }
     diagnostics() {
+      const updates = this.card("Mises \xE0 jour");
+      const info = element("p"), known = readJSON(UPDATE_KEY, {});
+      const describe = (result) => {
+        if (!result?.latest) return `Version install\xE9e : ${VERSION}. Aucune v\xE9rification pour l’instant.`;
+        const cmp = compareVersions(result.latest, VERSION);
+        return `Version install\xE9e : ${VERSION} \xB7 publi\xE9e : ${result.latest} (${cmp > 0 ? "mise \xE0 jour disponible" : cmp < 0 ? "version locale plus r\xE9cente" : "\xE0 jour"}) \xB7 v\xE9rifi\xE9 le ${new Date(result.checkedAt).toLocaleString("fr-FR")}.`;
+      };
+      info.textContent = describe(known);
+      const link = element("a", "Ouvrir le fichier publi\xE9");
+      link.className = "button";
+      link.href = UPDATE_SOURCE; link.target = "_blank"; link.rel = "noopener noreferrer";
+      const row = element("div");
+      row.className = "btns";
+      row.append(this.button("V\xE9rifier les mises \xE0 jour", async () => {
+        info.textContent = "V\xE9rification…";
+        const result = await this.refreshUpdate(true);
+        info.textContent = describe(result);
+      }), link);
+      updates.append(info, row);
       const fleet = dispatcher();
       const gameWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
       const campaign = this.campaign;
