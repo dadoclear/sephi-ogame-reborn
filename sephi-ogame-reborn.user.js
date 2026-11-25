@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SephiOGame
 // @namespace    sephiogame:local
-// @version      4.0.0-alpha.49
+// @version      4.0.0-alpha.50
 // @description  Frigos, rapports et preparation de flotte directement dans OGame
 // @author       Sephizack and contributors
 // @match        https://*.ogame.gameforge.com/game/index.php*
@@ -1037,7 +1037,7 @@
     return { galaxy, system };
   }
   function defaultExpeditionConfig() {
-    return { enabled: false, planetId: "", target: "", holdingTime: 1, speed: 100, maxConcurrent: 0, ships: {} };
+    return { enabled: false, planetId: "", target: "", holdingTime: 1, speed: 100, maxConcurrent: 0, ships: {}, autoSwitch: true };
   }
   function gameURL(params) {
     const url = new URL("/game/index.php", location.href);
@@ -1103,6 +1103,60 @@
     return Math.min(Math.max(wanted, now + 2 * 6e4), now + 60 * 6e4);
   }
   var timeFR = (time) => new Date(time).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  // Expedition results — read from the expedition reports (messages subtab 22, messageType 41).
+  // A system is considered exhausted when, over the last 7 days, at least 15 results are known
+  // and at least half of them brought nothing back; the target then moves by ±10 systems.
+  var EXPEDITION_RESULTS_TAB = "22", EXPEDITION_STATS_DAYS = 7, EXPEDITION_SWITCH_MIN = 15, EXPEDITION_SWITCH_RATIO = 0.5, EXPEDITION_SWITCH_STEP = 10;
+  function parseExpeditionReport(node) {
+    const raw = node.querySelector(".rawMessageData");
+    if (!raw || raw.getAttribute("data-raw-messagetype") !== "41") return null;
+    const id = node.getAttribute("data-msg-id"), at = Number(raw.getAttribute("data-raw-timestamp")) * 1e3;
+    const coords = (raw.getAttribute("data-raw-coords") ?? "").match(/^(\d+):(\d+):(\d+)$/);
+    if (!id || !at || !coords) return null;
+    // Anything in a "...gained" field (resources, ships, dark matter, items) counts as a gain.
+    const empty = (value) => value == null || /^\s*(|0|null|false|\[\]|\{\})\s*$/.test(value);
+    const gained = [...raw.attributes].filter((a) => /^data-raw-.+gained$/i.test(a.name) && !empty(a.value)).map((a) => a.name.replace(/^data-raw-/i, "").replace(/gained$/i, ""));
+    return { id, at, system: `${coords[1]}:${coords[2]}`, result: raw.getAttribute("data-raw-expeditionresult") ?? "", gain: gained.length > 0, gained, depletion: Number(raw.getAttribute("data-raw-depletion")) || null };
+  }
+  // Newest reports first; stops at the first page that brings nothing new or reaches the 7-day limit.
+  async function fetchExpeditionReports(knownIds, since, maxPages = 10) {
+    const found = [];
+    let pages = 1;
+    for (let page = 1; page <= Math.min(pages, maxPages); page++) {
+      const body = new URLSearchParams({ activeSubTab: EXPEDITION_RESULTS_TAB, showTrash: "false", messagePage: String(page) });
+      const response = await fetch(gameURL({ page: "componentOnly", component: "messages", asJson: 1, action: "getMessagesList" }), { method: "POST", credentials: "include", cache: "no-store", headers: { "X-Requested-With": "XMLHttpRequest" }, body });
+      if (!response.ok) throw new Error(`Rapports d’exp\xE9dition indisponibles (HTTP ${response.status}).`);
+      const data = await response.json().catch(() => null);
+      if (!data || !Array.isArray(data.messages)) throw new Error("R\xE9ponse inattendue du lecteur de messages.");
+      pages = Number(data.pageCount) || 1;
+      const doc = new DOMParser().parseFromString(data.messages.join(""), "text/html");
+      let fresh = 0, reachedOld = false;
+      for (const node of doc.querySelectorAll("[data-msg-id]")) {
+        const report = parseExpeditionReport(node);
+        if (!report) continue;
+        if (report.at < since) { reachedOld = true; continue; }
+        if (knownIds.has(report.id)) continue;
+        found.push(report); fresh += 1;
+      }
+      if (reachedOld || !fresh) break;
+    }
+    return found;
+  }
+  function systemStats(results, galaxy, system) {
+    const key = `${galaxy}:${system}`, list = results.filter((r) => r.system === key);
+    const empty = list.filter((r) => !r.gain).length;
+    return { system: key, count: list.length, empty, ratio: list.length ? empty / list.length : 0, depletion: list.sort((a, b) => b.at - a.at)[0]?.depletion ?? null };
+  }
+  async function universeSystemCount() {
+    const key = `sephiogame:${location.host}:systems`, cached = readJSON(key, {});
+    if (cached.value && Date.now() - cached.at < 7 * 864e5) return cached.value;
+    try {
+      const xml = await (await fetch("/api/serverData.xml", { cache: "no-store" })).text();
+      const value = Number(xml.match(/<systems>(\d+)<\/systems>/)?.[1]);
+      if (value > 0) { localStorage.setItem(key, JSON.stringify({ value, at: Date.now() })); return value; }
+    } catch { /* Default below. */ }
+    return 499;
+  }
   function constructionCosts(detail, quantity = 1) {
     const costs = {};
     let found = false;
@@ -1884,7 +1938,7 @@
   }
 
   // src/core/version.ts
-  var VERSION = "4.0.0-alpha.49";
+  var VERSION = "4.0.0-alpha.50";
   // Update check: compares @version of the published file with VERSION. The raw URL is also the update link:
   // Tampermonkey intercepts *.user.js files and offers to update the installed script.
   var UPDATE_SOURCE = "https://raw.githubusercontent.com/dadoclear/sephi-ogame-reborn/main/sephi-ogame-reborn.user.js";
@@ -1999,7 +2053,8 @@ button.launch.danger::before{content:"\\26A0"}
 @keyframes sephi-armed{50%{transform:scale(1.015)}}.grid.ships{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:12px}.grid.ships small{font-size:11px}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px}.stats>div{display:grid;gap:2px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:rgba(5,11,21,.4)}.stats small{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}.stats strong{font-size:13px}
 .timeline{list-style:none;margin:0 0 10px;padding:0 0 0 14px;border-left:2px solid var(--line2)}.timeline li{position:relative;margin:4px 0;font-size:12px;color:var(--text)}.timeline li::before{content:"";position:absolute;left:-19px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--a1)}
-.warn{color:var(--danger)!important}.timeline li.warn::before{background:var(--danger)}
+.warn{color:var(--danger)!important}
+table.exp-stats{margin-bottom:6px}table.exp-stats tr.current td{background:rgba(70,224,200,.07)}table.exp-stats tr.current td:first-child{color:#a3f1e4;font-weight:600}.timeline li.warn::before{background:var(--danger)}
 a.button{display:inline-flex;align-items:center;justify-content:center;line-height:1.3;white-space:nowrap}
 .btns{display:flex;flex-wrap:wrap;gap:5px}.btns+.btns{margin-top:5px}.btns button,.btns a.button{margin:0;padding:4px 10px;line-height:1.3;white-space:nowrap}
 td.actions{width:45%}td.actions details{margin-top:6px}
@@ -4031,6 +4086,31 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const log = [{ at: Date.now(), text, ok }, ...(this.expeditionState().log ?? [])].slice(0, 15);
       this.setExpeditionState({ log });
     }
+    // Results of the last 7 days, kept apart from the reports themselves (which the player may delete).
+    expeditionResults() {
+      const since = Date.now() - EXPEDITION_STATS_DAYS * 864e5;
+      return readJSON(`${this.store.key}:expedition-results`, []).filter((r) => r.at >= since);
+    }
+    async collectExpeditionResults() {
+      const since = Date.now() - EXPEDITION_STATS_DAYS * 864e5, known = this.expeditionResults();
+      const fresh = await fetchExpeditionReports(new Set(known.map((r) => r.id)), since);
+      const results = [...fresh, ...known].sort((a, b) => b.at - a.at).slice(0, 2e3);
+      localStorage.setItem(`${this.store.key}:expedition-results`, JSON.stringify(results));
+      return { results, fresh: fresh.length };
+    }
+    // Returns the new target when the current system is exhausted, otherwise null.
+    async exhaustedSystemSwitch(target, results) {
+      const current = systemStats(results, target.galaxy, target.system);
+      if (current.count < EXPEDITION_SWITCH_MIN || current.ratio < EXPEDITION_SWITCH_RATIO) return null;
+      const max = await universeSystemCount();
+      const candidates = [target.system + EXPEDITION_SWITCH_STEP, target.system - EXPEDITION_SWITCH_STEP].filter((s) => s >= 1 && s <= max)
+        .map((s) => systemStats(results, target.galaxy, s))
+        // Least exhausted neighbour first (no data counts as fresh); +10 wins a tie.
+        .sort((a, b) => a.ratio - b.ratio || Number(b.system.split(":")[1]) - Number(a.system.split(":")[1]));
+      if (!candidates.length) return null;
+      const [galaxy, system] = candidates[0].system.split(":").map(Number);
+      return { galaxy, system, current };
+    }
     // Called every second by the automation clock; does real work only when a check is due.
     monitorExpeditions() {
       if (window.top !== window.self || !this.context || this.expeditionBusy) return;
@@ -4051,7 +4131,22 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       try {
         const planet = ownedPlanets().find((p) => p.id === config.planetId);
         if (!planet) throw new Error("Choisissez une plan\xE8te de d\xE9part dans l’onglet Exp\xE9ditions.");
-        const target = config.target ? parseSystem(config.target) : { galaxy: planet.coords.galaxy, system: planet.coords.system };
+        let target = config.target ? parseSystem(config.target) : { galaxy: planet.coords.galaxy, system: planet.coords.system };
+        // Read the latest expedition reports, then move away from an exhausted system before sending.
+        try {
+          this.setExpeditionState({ message: "Lecture des rapports d’exp\xE9dition…" });
+          const { results, fresh } = await this.collectExpeditionResults();
+          if (fresh) this.logExpedition(`${fresh} nouveau(x) rapport(s) d’exp\xE9dition analys\xE9(s).`);
+          const next = config.autoSwitch !== false ? await this.exhaustedSystemSwitch(target, results) : null;
+          if (next) {
+            const text = `${next.galaxy}:${next.system}`;
+            localStorage.setItem(`${this.store.key}:expedition-config`, JSON.stringify({ ...this.expeditionConfig(), target: text }));
+            this.logExpedition(`Syst\xE8me ${next.current.system} \xE9puis\xE9 (${next.current.empty}/${next.current.count} sans gain sur ${EXPEDITION_STATS_DAYS} j) → passage en ${text}.`);
+            target = { galaxy: next.galaxy, system: next.system };
+          }
+        } catch (error) {
+          this.logExpedition(`Rapports d’exp\xE9dition non lus : ${error instanceof Error ? error.message : error}`, false);
+        }
         const fleet = Object.fromEntries(Object.entries(config.ships ?? {}).map(([id, count]) => [id, Math.max(0, Math.floor(Number(count) || 0))]).filter(([, count]) => count > 0));
         if (send && !Object.keys(fleet).length) throw new Error("Aucun vaisseau configur\xE9 pour les exp\xE9ditions.");
         this.setExpeditionState({ message: "Lecture de la page flotte…" });
@@ -4113,6 +4208,8 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const holding = this.select(grid, "Dur\xE9e sur place", "holdingTime", Array.from({ length: 16 }, (_, i) => [String(i + 1), `${i + 1} h`]), String(config.holdingTime));
       const speed = this.select(grid, "Vitesse", "speed", Array.from({ length: 10 }, (_, i) => [String(100 - i * 10), `${100 - i * 10} %`]), String(config.speed));
       const concurrent = this.select(grid, "Exp\xE9ditions simultan\xE9es", "maxConcurrent", [["0", "Maximum autoris\xE9 par OGame"], ...Array.from({ length: 12 }, (_, i) => [String(i + 1), String(i + 1)])], String(config.maxConcurrent ?? 0));
+      const autoSwitch = this.select(grid, "Syst\xE8me \xE9puis\xE9", "autoSwitch", [["on", `Changer (\xB1${EXPEDITION_SWITCH_STEP})`], ["off", "Ne pas changer"]], config.autoSwitch === false ? "off" : "on");
+      autoSwitch.title = `Sur ${EXPEDITION_STATS_DAYS} jours glissants : si au moins ${EXPEDITION_SWITCH_MIN} exp\xE9ditions vers ce syst\xE8me sont connues et qu’au moins la moiti\xE9 n’a rien rapport\xE9, la cible passe au syst\xE8me voisin \xE0 \xB1${EXPEDITION_SWITCH_STEP} le moins \xE9puis\xE9.`;
       form.append(grid);
       const state = this.expeditionState();
       const known = state.ships?.planetId === config.planetId ? state.ships.available : null;
@@ -4135,7 +4232,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
         for (const [id, input] of Object.entries(inputs)) { const count = Math.floor(Number(input.value) || 0); if (count < 0) throw new Error("Les quantit\xE9s de vaisseaux doivent \xEAtre positives."); if (count) ships[id] = count; }
         const targetText = target.value.trim();
         if (targetText) parseSystem(targetText);
-        const next = { enabled: enabled.value === "on", planetId: origin.value, target: targetText, holdingTime: Number(holding.value), speed: Number(speed.value), maxConcurrent: Number(concurrent.value), ships };
+        const next = { enabled: enabled.value === "on", planetId: origin.value, target: targetText, holdingTime: Number(holding.value), speed: Number(speed.value), maxConcurrent: Number(concurrent.value), ships, autoSwitch: autoSwitch.value === "on" };
         if ((next.enabled || needShips) && !next.planetId) throw new Error("Choisissez une plan\xE8te de d\xE9part.");
         if ((next.enabled || needShips) && !Object.keys(ships).length) throw new Error("Indiquez au moins un vaisseau \xE0 envoyer.");
         return next;
@@ -4204,6 +4301,33 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       for (const [label, value] of rows) { const item = element("div"); item.append(element("small", label), element("strong", value)); list.append(item); }
       const nodes = [list];
       if (state.message) { const p = element("p", state.message); if (state.error) p.className = "warn"; nodes.push(p); }
+      // Results of the last 7 days per system, current target first.
+      const results = this.expeditionResults();
+      const planet = ownedPlanets().find((p) => p.id === config.planetId);
+      let current = null;
+      try { current = config.target ? parseSystem(config.target) : planet ? { galaxy: planet.coords.galaxy, system: planet.coords.system } : null; } catch { current = null; }
+      const currentKey = current ? `${current.galaxy}:${current.system}` : null;
+      if (currentKey) { const item = element("div"); item.append(element("small", "Syst\xE8me cible"), element("strong", `[${currentKey}:16]`)); list.prepend(item); }
+      const systems = [...new Set([currentKey, ...results.map((r) => r.system)].filter(Boolean))].slice(0, 8);
+      if (systems.length) {
+        const table = element("table"), head = element("tr");
+        table.className = "exp-stats";
+        for (const label of ["Syst\xE8me", "Exp\xE9d.", "Sans gain", "Taux", "\xC9puisement OGame"]) head.append(element("th", label));
+        const thead = element("thead"); thead.append(head);
+        const tbody = element("tbody");
+        for (const key of systems) {
+          const [g, s] = key.split(":").map(Number), stat = systemStats(results, g, s);
+          const row = element("tr");
+          if (key === currentKey) row.className = "current";
+          const exhausted = stat.count >= EXPEDITION_SWITCH_MIN && stat.ratio >= EXPEDITION_SWITCH_RATIO;
+          const rate = element("td", stat.count ? `${Math.round(stat.ratio * 100)} %` : "—");
+          if (exhausted) rate.className = "warn";
+          row.append(element("td", `[${key}]${key === currentKey ? " \xB7 cible" : ""}`), element("td", String(stat.count)), element("td", String(stat.empty)), rate, element("td", stat.depletion ? `niveau ${stat.depletion}` : "—"));
+          tbody.append(row);
+        }
+        table.append(thead, tbody);
+        nodes.push(element("h2", `R\xE9sultats sur ${EXPEDITION_STATS_DAYS} jours`), table, element("small", `Changement de syst\xE8me si ≥ ${EXPEDITION_SWITCH_MIN} exp\xE9ditions et ≥ ${Math.round(EXPEDITION_SWITCH_RATIO * 100)} % sans gain${config.autoSwitch === false ? " (d\xE9sactiv\xE9)" : ""}.`));
+      }
       const flying = (state.movements ?? []).filter((fleet) => fleet.arrival > Date.now());
       if (flying.length) {
         const ul = element("ul");
@@ -4229,7 +4353,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const selector = this.select(card, "File de la planète / lune", "constructionPlanet", [...planets], planetId);
       selector.addEventListener("change", () => { this.constructionPlanetId = selector.value; this.render(); });
       const state = this.constructionState(planetId), queue = planetQueue(this.data.constructionQueue ?? [], planetId);
-      card.append(element("p", "Surveillance permanente : l’ajout suffit pour programmer une construction. Après une minute sans clic ni saisie, le script visite les planètes à tour de rôle, vérifie leurs ressources et lance ce qui est disponible. Aucun démarrage manuel n’est nécessaire."));
+      card.append(element("p", "Surveillance permanente : l’ajout suffit pour programmer une construction. Après deux minutes sans clic ni saisie, le script visite les planètes à tour de rôle, vérifie leurs ressources et lance ce qui est disponible. Aucun démarrage manuel n’est nécessaire."));
       card.append(element("p", state.message ?? "Contrôle automatique au prochain passage."));
       const economy = readJSON(`${this.store.key}:economies`)[planetId];
       if (economy) card.append(element("p", `Production / heure : métal ${economy.production?.metal ?? "inconnue"}, cristal ${economy.production?.crystal ?? "inconnue"}, deutérium ${economy.production?.deuterium ?? "inconnue"}. Données relevées le ${new Date(economy.at).toLocaleString("fr-FR")}.`));
