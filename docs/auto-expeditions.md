@@ -22,7 +22,7 @@ Everything is done by calling OGame's own HTTP endpoints from the game page — 
 
 1. Open the panel, tab **Expéditions**.
 2. Choose the « Planète de départ » (planets and moons are listed).
-3. Enter the number of each ship to send per expedition in « Flotte envoyée à chaque expédition ». Click « Actualiser l’état » to see « Disponible : N » under each field.
+3. Enter the number of each ship to send per expedition in « Flotte envoyée à chaque expédition ». « Disponible : N » under each field shows what the selected departure planet has (see [Available ships](#available-ships)).
 4. Set « Automatique » to **Activée** and click **Enregistrer**. The first check runs a few seconds later.
 
 To send immediately, once, without enabling the automatic mode: click **🚀 Envoyer maintenant**, then **⚠ Confirmer l’envoi** within 6 seconds.
@@ -49,6 +49,22 @@ To send immediately, once, without enabling the automatic mode: click **🚀 Env
 Ship types offered: Petit transporteur (202), Grand transporteur (203), Éclaireur (219), Chasseur léger (204), Chasseur lourd (205), Croiseur (206), Vaisseau de bataille (207), Traqueur (215), Bombardier (211), Destructeur (213), Faucheur (218), Recycleur (209), Sonde d’espionnage (210), Étoile de la mort (214).
 
 The number of fleet slots kept free comes from the **Paramètres** tab (« Slots de flotte à garder libres pour les auto-attaques et sondages », setting `reservedFleetSlots`). Expeditions never use those slots.
+
+### Available ships
+
+Each ship field shows how many of that ship the **departure planet currently selected in the form** has — saved or not. Changing « Planète de départ » updates all the hints at once.
+
+| Hint | Meaning |
+|---|---|
+| « Disponible : 3 442 » | Last reading for that planet. Hover to see when it was read. |
+| « Disponible : inconnu · lecture en cours… » | No reading yet for that planet: its fleet page is being read in the background. |
+| « Disponible : inconnu · lecture impossible » | The reading failed (hover for the reason); it is tried again after 1 minute. |
+| « Disponible : choisissez une planète de départ » | No departure planet selected. |
+
+- Readings are kept **per planet** (`shipsByPlanet`). They come from every cycle (« Actualiser l’état », automatic cycles, « Envoyer maintenant ») and from these background readings.
+- A reading older than **15 minutes** is still shown, and refreshed in the background when the planet is displayed.
+- Reading another planet’s fleet page makes it OGame’s active planet; after a background reading, the script switches OGame back to the planet on screen (light request to `component=eventList` with `cp=<current planet>`), so the next page opened in OGame is not affected.
+- The hints refresh in place: what is being typed in the form is never lost.
 
 ### Buttons
 
@@ -106,7 +122,7 @@ Details:
 5. **Free slots**: `min(limit − expeditionCount, maxFleetCount − reserved − fleetCount)`, where `limit` is « Expéditions simultanées » (or the OGame maximum).
 6. **Sending loop**: for each free slot, check that the planet still has enough of every configured ship, then send one expedition. OGame returns a new token after each request, used for the next one. The loop stops on the first refusal or shortage.
 7. **Movements** (`fetchExpeditionMovements`): reads expedition fleets in flight to plan the next check.
-8. **State**: counters, available ships, fleets in flight, message and next check time are saved and displayed.
+8. **State**: counters, available ships of the departure planet (after the sends), fleets in flight, message and next check time are saved and displayed.
 
 ---
 
@@ -203,7 +219,7 @@ All data is in the browser’s `localStorage` for the OGame domain. `<account>` 
 | Key | Content |
 |---|---|
 | `<account>:expedition-config` | Settings of the tab: `enabled`, `planetId`, `target`, `holdingTime`, `speed`, `maxConcurrent`, `ships` (`{ shipId: count }`), `autoSwitch`. |
-| `<account>:expedition-state` | Last cycle: `lastCheckAt`, `nextCheckAt`, `counts`, `ships` (available on the departure planet), `movements`, `message`, `error`, `log` (15 entries). |
+| `<account>:expedition-state` | Last cycle: `lastCheckAt`, `nextCheckAt`, `counts`, `shipsByPlanet` (per planet id: `at`, `available` ships), `movements`, `message`, `error`, `log` (15 entries). |
 | `<account>:expedition-results` | Results of the last 7 days: `id` (message id), `at`, `system`, `result`, `gain`, `gained`, `depletion`. |
 | `<account>:expedition-lease` | Which tab runs the current cycle (`owner`, `at`). Removed at the end of the cycle. |
 | `sephiogame:<host>:systems` | Number of systems in the universe, cached 7 days. |
@@ -229,7 +245,7 @@ The expedition data is **not** included in the Sauvegardes JSON export.
 ## Limits and known behaviours
 
 - **A tab must be open.** The script runs in the OGame page. With every OGame tab closed, nothing is relaunched; on reopening, a check runs at once if one was due.
-- **Active planet changes.** Reading the fleet page with `cp=<planetId>` switches OGame’s active planet, as the construction rotation already does. The next page opened in OGame may show the departure planet.
+- **Active planet changes during a cycle.** A cycle reads the departure planet’s fleet page with `cp=<planetId>`, which switches OGame’s active planet, as the construction rotation already does. The next page opened in OGame may show the departure planet. (Background readings of [available ships](#available-ships) switch back afterwards.)
 - **Token of an open page.** If the Galaxy or Flotte page is open in another tab while a send happens, its token can become stale; that page then needs a reload.
 - **Reports marked as read.** Reading the reports through the messages API may mark them as read in OGame.
 - **Holding time.** The panel offers 1–16 h; the real maximum depends on the account’s research and OGame refuses higher values.
@@ -264,6 +280,8 @@ All in [`sephi-ogame-reborn.user.js`](../sephi-ogame-reborn.user.js).
 | `defaultExpeditionConfig()` | Default settings. |
 | `gameURL(params)` | Builds `/game/index.php` URLs. |
 | `fetchFleetSnapshot(planetId)` | Reads the departure planet’s fleet page. |
+| `Panel.showExpeditionShips(planetId, hints)`, `Panel.readExpeditionShips(planetId)` | « Disponible » hints for the selected planet; background reading and switch back. |
+| `EXPEDITION_SHIPS_MAX_AGE` | Age after which a reading is refreshed (15 min). |
 | `sendExpeditionFleet(...)` | Sends one expedition through `sendFleet`. |
 | `fetchExpeditionMovements()` | Reads expedition fleets in flight. |
 | `nextExpeditionCheck(fleets)` | Computes the next check time. |
