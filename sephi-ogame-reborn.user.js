@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SephiOGame
 // @namespace    sephiogame:local
-// @version      4.0.0-alpha.50
+// @version      4.0.0-alpha.51
 // @description  Frigos, rapports et preparation de flotte directement dans OGame
 // @author       Sephizack and contributors
 // @match        https://*.ogame.gameforge.com/game/index.php*
@@ -1030,6 +1030,7 @@
   // so no page has to be driven or clicked.
   var EXPEDITION_SHIPS = [[202, "Petit transporteur"], [203, "Grand transporteur"], [219, "\xC9claireur"], [204, "Chasseur l\xE9ger"], [205, "Chasseur lourd"], [206, "Croiseur"], [207, "Vaisseau de bataille"], [215, "Traqueur"], [211, "Bombardier"], [213, "Destructeur"], [218, "Faucheur"], [209, "Recycleur"], [210, "Sonde d’espionnage"], [214, "\xC9toile de la mort"]];
   var EXPEDITION_MISSION = 15, EXPEDITION_POSITION = 16;
+  var EXPEDITION_SHIPS_MAX_AGE = 15 * 6e4; // « Disponible » readings older than this are refreshed in the background
   function parseSystem(text) {
     const match = String(text).match(/^\s*\[?\s*(\d+)\s*:\s*(\d+)\s*\]?\s*$/);
     if (!match) throw new Error("Syst\xE8me cible invalide. Exemple : 3:179.");
@@ -1938,7 +1939,7 @@
   }
 
   // src/core/version.ts
-  var VERSION = "4.0.0-alpha.50";
+  var VERSION = "4.0.0-alpha.51";
   // Update check: compares @version of the published file with VERSION. The raw URL is also the update link:
   // Tampermonkey intercepts *.user.js files and offers to update the installed script.
   var UPDATE_SOURCE = "https://raw.githubusercontent.com/dadoclear/sephi-ogame-reborn/main/sephi-ogame-reborn.user.js";
@@ -4178,7 +4179,7 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
         this.setExpeditionState({
           lastCheckAt: now, nextCheckAt: send ? nextExpeditionCheck(movements, now) : this.expeditionState().nextCheckAt,
           counts: { expeditionCount, maxExpeditionCount: snapshot.maxExpeditionCount, fleetCount, maxFleetCount: snapshot.maxFleetCount, reserved, limit },
-          ships: { planetId: planet.id, at: now, available: ships }, movements, error: null,
+          shipsByPlanet: { ...this.expeditionState().shipsByPlanet, [planet.id]: { at: now, available: ships } }, movements, error: null,
           message: sent ? `${sent} exp\xE9dition(s) envoy\xE9e(s).${why ? ` ${why}` : ""}` : why || "Contr\xF4le termin\xE9."
         });
         if (stop && !stop.startsWith("OGame")) this.logExpedition(stop, false);
@@ -4192,6 +4193,47 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
         this.expeditionBusy = false;
         const leaseKey = `${this.store.key}:expedition-lease`;
         if (readJSON(leaseKey).owner === this.campaignTabId) localStorage.removeItem(leaseKey);
+      }
+    }
+    // « Disponible » hints for one planet: last reading if known, « inconnu » otherwise; a missing or
+    // old reading is fetched in the background, then the hints refresh if that planet is still selected.
+    showExpeditionShips(planetId, hints, selected = () => planetId) {
+      const nodes = Object.entries(hints);
+      const paint = (text, title = "", warn = false) => { for (const [, node] of nodes) { node.textContent = text; node.title = title; node.classList.toggle("warn", warn); } };
+      if (!planetId) return paint("Disponible : choisissez une plan\xE8te de d\xE9part");
+      const entry = this.expeditionState().shipsByPlanet?.[planetId];
+      if (entry) for (const [id, node] of nodes) {
+        node.textContent = `Disponible : ${fmt(entry.available?.[id] ?? 0)}`;
+        node.title = `Relev\xE9 le ${new Date(entry.at).toLocaleString("fr-FR")}`;
+        node.classList.remove("warn");
+      }
+      else paint("Disponible : inconnu");
+      if (entry && Date.now() - entry.at < EXPEDITION_SHIPS_MAX_AGE) return;
+      if (this.expeditionShipsLoading?.has(planetId)) { if (!entry) paint("Disponible : inconnu \xB7 lecture en cours…"); return; }
+      if (Date.now() - (this.expeditionShipsFailures?.[planetId]?.at ?? 0) < 6e4) {
+        if (!entry) paint("Disponible : inconnu \xB7 lecture impossible", this.expeditionShipsFailures[planetId].message, true);
+        return;
+      }
+      if (!entry) paint("Disponible : inconnu \xB7 lecture en cours…");
+      const refresh = () => { if (nodes[0]?.[1].isConnected && selected() === planetId) this.showExpeditionShips(planetId, hints, selected); };
+      void this.readExpeditionShips(planetId).then(refresh, refresh);
+    }
+    async readExpeditionShips(planetId) {
+      (this.expeditionShipsLoading ??= new Set()).add(planetId);
+      try {
+        const planet = ownedPlanets().find((p) => p.id === planetId);
+        const snapshot = await fetchFleetSnapshot(planetId), p = snapshot.planet;
+        if (planet && (p.galaxy !== planet.coords.galaxy || p.system !== planet.coords.system || p.position !== planet.coords.position || (p.type === 3) !== (planet.coords.type === "moon")))
+          throw new Error(`OGame a ouvert ${p.name ?? "une autre plan\xE8te"} au lieu de ${planetLabel(planet)}.`);
+        this.setExpeditionState({ shipsByPlanet: { ...this.expeditionState().shipsByPlanet, [planetId]: { at: Date.now(), available: snapshot.ships } } });
+        if (this.expeditionShipsFailures) delete this.expeditionShipsFailures[planetId];
+      } catch (error) {
+        (this.expeditionShipsFailures ??= {})[planetId] = { at: Date.now(), message: error instanceof Error ? error.message : String(error) };
+        throw error;
+      } finally {
+        this.expeditionShipsLoading.delete(planetId);
+        // Reading another planet's fleet page makes it OGame's active planet: switch back to the one on screen.
+        if (this.context?.planetId && planetId !== this.context.planetId) await fetch(gameURL({ page: "componentOnly", component: "eventList", ajax: 1, cp: this.context.planetId }), { credentials: "include", cache: "no-store" }).catch(() => {});
       }
     }
     expeditions() {
@@ -4211,19 +4253,22 @@ table.targets td:first-child,table.targets td.actions{grid-column:1/-1}
       const autoSwitch = this.select(grid, "Syst\xE8me \xE9puis\xE9", "autoSwitch", [["on", `Changer (\xB1${EXPEDITION_SWITCH_STEP})`], ["off", "Ne pas changer"]], config.autoSwitch === false ? "off" : "on");
       autoSwitch.title = `Sur ${EXPEDITION_STATS_DAYS} jours glissants : si au moins ${EXPEDITION_SWITCH_MIN} exp\xE9ditions vers ce syst\xE8me sont connues et qu’au moins la moiti\xE9 n’a rien rapport\xE9, la cible passe au syst\xE8me voisin \xE0 \xB1${EXPEDITION_SWITCH_STEP} le moins \xE9puis\xE9.`;
       form.append(grid);
-      const state = this.expeditionState();
-      const known = state.ships?.planetId === config.planetId ? state.ships.available : null;
       form.append(element("h2", "Flotte envoy\xE9e \xE0 chaque exp\xE9dition"));
       const shipsGrid = element("div");
       shipsGrid.className = "grid ships";
-      const inputs = {};
+      const inputs = {}, hints = {};
       for (const [id, name] of EXPEDITION_SHIPS) {
         const input = this.field(shipsGrid, name, `am${id}`, String(config.ships?.[id] ?? ""), "number");
         input.min = "0"; input.step = "1"; input.placeholder = "0";
-        if (known) input.parentElement.append(element("small", `Disponible : ${fmt(known[id] ?? 0)}`));
+        hints[id] = element("small");
+        input.parentElement.append(hints[id]);
         inputs[id] = input;
       }
       form.append(shipsGrid);
+      // « Disponible » always follows the departure planet selected in the form (saved or not).
+      const showAvailability = () => this.showExpeditionShips(origin.value, hints, () => origin.value);
+      origin.addEventListener("change", showAvailability);
+      showAvailability();
       const actions = element("div");
       actions.className = "btns";
       // Reads and validates the form as it is on screen (saved or not).
